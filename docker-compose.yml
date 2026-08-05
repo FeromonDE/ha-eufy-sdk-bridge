@@ -1,0 +1,17 @@
+services:
+  ha-eufy-sdk-bridge:
+    build:
+      context: .
+    container_name: ha-eufy-sdk-bridge
+    restart: unless-stopped
+    # WebRTC needs UDP + ICE, painful behind bridge networking. RTSP and the WS are fine either way —
+    # drop host mode and publish 3000/1984/8554 if you do not need WebRTC.
+    network_mode: host
+    environment:
+      EUFY_EMAIL: ${EUFY_EMAIL}
+      EUFY_PASSWORD: ${EUFY_PASSWORD}
+      EUFY_COUNTRY: ${EUFY_COUNTRY:-GB}
+      BRIDGE_HOST: 0.0.0.0
+    volumes:
+      # Persist the login so a restart doesn't re-authenticate (eufy = ONE session per account).
+      - ./data:/app/data
