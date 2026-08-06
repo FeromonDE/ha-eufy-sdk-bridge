@@ -15,7 +15,7 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "eufy-mega": "file:../eufy-mega",
+    "@mega-yfue/eufy-sdk": "file:../eufy-sdk",
     "ws": "^8.18.0"
   }
 }

@@ -18,10 +18,19 @@ drift out of sync.
 
 ## Run it
 
+Pull the published image and run it (bundles the SDK + go2rtc):
+
 ```bash
-cp .env.example .env      # EUFY_EMAIL / EUFY_PASSWORD / EUFY_COUNTRY
-docker compose up
+docker run -d --name eufy-bridge --network host \
+  -e EUFY_EMAIL='you@example.com' -e EUFY_PASSWORD='…' -e EUFY_COUNTRY='GB' \
+  -v /opt/eufy-bridge-data:/app/data \
+  <your-image>
 ```
+
+or with Compose (`cp .env.example .env` first): `docker compose up -d`.
+
+**Full deploy guide (alongside Home Assistant, config reference, first-run 2FA/captcha):**
+[docs/docker-compose.md](./docs/docker-compose.md) · **WS protocol:** [docs/ws-protocol.md](./docs/ws-protocol.md)
 
 ## Where it fits
 
@@ -32,4 +41,5 @@ docker compose up
 | [`ha-eufy-sdk-addon`](https://github.com/mega-yfue/ha-eufy-sdk-addon) | Home Assistant add-on wrapper |
 | [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk) | the HACS integration (front door) |
 
-> Status: scaffolding. The daemon implementation lands next.
+> Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
+> streaming. Published image: `<your-image>` (amd64; multi-arch on the roadmap).

@@ -2,16 +2,25 @@ services:
   ha-eufy-sdk-bridge:
     build:
       context: .
+      # The SDK (@mega-yfue/eufy-sdk) is a sibling checkout; the Dockerfile builds it from this named
+      # build context. Requires Compose v2.17+ (additional_contexts).
+      additional_contexts:
+        sdk: ../eufy-sdk
+    image: ha-eufy-sdk-bridge:local
     container_name: ha-eufy-sdk-bridge
     restart: unless-stopped
     # WebRTC needs UDP + ICE, painful behind bridge networking. RTSP and the WS are fine either way —
     # drop host mode and publish 3000/1984/8554 if you do not need WebRTC.
     network_mode: host
+    # Credentials come from ./.env (cp .env.example .env, or copy your workshop .env here).
+    env_file:
+      - .env
     environment:
-      EUFY_EMAIL: ${EUFY_EMAIL}
-      EUFY_PASSWORD: ${EUFY_PASSWORD}
-      EUFY_COUNTRY: ${EUFY_COUNTRY:-GB}
-      BRIDGE_HOST: 0.0.0.0
+      # Reachable through the hosted ports, not just localhost.
+      BRIDGE_HOST: "0.0.0.0"
+      # WS/HTTP control port. Change it by setting BRIDGE_PORT in .env (default 3000). On host
+      # networking the daemon simply binds this port; the integration must use the same one.
+      BRIDGE_PORT: ${BRIDGE_PORT:-3000}
     volumes:
       # Persist the login so a restart doesn't re-authenticate (eufy = ONE session per account).
       - ./data:/app/data

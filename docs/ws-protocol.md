@@ -1,0 +1,208 @@
+# ha-eufy-sdk-bridge — WebSocket protocol
+
+The bridge exposes control, state, auth and events over one WebSocket, and video/snapshots over sibling
+HTTP endpoints. This is the reference for what a frontend (the HACS integration, a web UI, anything)
+sends and receives.
+
+- **Endpoint:** `ws://<host>:3000/ws`
+- **Schema version:** `1` (sent in `hello`/`ready`; bumped on any breaking change so an old client fails loudly)
+- **Encoding:** JSON text frames.
+
+## Message shapes
+
+**Request** (client → bridge): a `cmd` plus a caller-chosen `id` used to match the reply.
+
+```json
+{ "id": 1, "cmd": "<command>", "...": "command args" }
+```
+
+**Response** (bridge → client): echoes `id`, with `ok`.
+
+```json
+{ "id": 1, "ok": true,  "...": "result fields" }
+{ "id": 1, "ok": false, "error": "reason" }
+```
+
+**Event** (bridge → client, unsolicited): no `id`, carries an `event` name.
+
+```json
+{ "event": "<name>", "...": "payload" }
+```
+
+---
+
+## Commands
+
+### `auth.status`
+Ask what the login needs right now.
+
+```jsonc
+// →
+{ "id": 1, "cmd": "auth.status" }
+// ←
+{ "id": 1, "ok": true, "auth": { "state": "ok" } }
+```
+
+`auth` is one of:
+
+| state | extra fields | meaning |
+| --- | --- | --- |
+| `ok` | — | logged in; device commands work |
+| `require_2fa` | `method` | a 2FA code was sent; submit it |
+| `require_captcha` | `image` (`data:image/png;base64,…`), `retry` (bool) | solve the captcha image |
+| `pending` | — | no challenge yet / retrying |
+
+### `auth.submit`
+Submit a 2FA code **or** a captcha answer. The pending id/token is held inside the bridge.
+
+```jsonc
+// 2FA:
+{ "id": 2, "cmd": "auth.submit", "code": "123456" }
+// captcha:
+{ "id": 2, "cmd": "auth.submit", "captcha": "AB3D" }
+// ←  (the new auth state after the attempt)
+{ "id": 2, "ok": true, "auth": { "state": "ok" } }
+// missing both →
+{ "id": 2, "ok": false, "error": "auth.submit needs { code } (2FA) or { captcha } (captcha answer)" }
+```
+
+### `auth.retrigger`
+Request a fresh challenge (new captcha image / new 2FA code).
+
+```jsonc
+// →
+{ "id": 3, "cmd": "auth.retrigger" }
+// ←
+{ "id": 3, "ok": true, "auth": { "state": "require_captcha", "image": "data:image/png;base64,…", "retry": false } }
+```
+
+### `devices.list`
+Every device the account exposes. *(Requires `auth.state == "ok"`.)*
+
+```jsonc
+// →
+{ "id": 4, "cmd": "devices.list" }
+// ←
+{
+  "id": 4, "ok": true,
+  "devices": [
+    {
+      "sn": "EXAMPLE-CAM-0001",
+      "name": "Living Room Camera",
+      "codec": "camera",
+      "capabilities": ["video","snapshot","motion","camera","rtsp","battery","light","ptz","audio","info"],
+      "stream": "/stream/EXAMPLE-CAM-0001"
+    },
+    { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "codec": "sensor",
+      "capabilities": ["contact","battery","info"] }
+  ]
+}
+```
+
+- `stream` is present only on devices with live video (cameras/doorbells).
+- A device that failed to resolve appears as `{ "sn": "…", "error": "…" }`.
+
+### `device.state`
+The same shape as one `devices.list` entry, for a single device. *(Requires auth.)*
+
+```jsonc
+// →
+{ "id": 5, "cmd": "device.state", "sn": "EXAMPLE-CAM-0001" }
+// ←
+{ "id": 5, "ok": true, "device": { "sn": "…", "name": "…", "codec": "camera", "capabilities": ["…"], "stream": "/stream/…" } }
+```
+
+### `device.set`
+Write a property (maps to the SDK's `setProperty`). The valid `name`s are the writable properties a
+device's capabilities expose (e.g. `statusLed`, `nightVision`, guard-mode `mode`, …). *(Requires auth.)*
+
+```jsonc
+// →
+{ "id": 6, "cmd": "device.set", "sn": "EXAMPLE-CAM-0001", "name": "statusLed", "value": true }
+// ←
+{ "id": 6, "ok": true }
+// unsupported property / device →
+{ "id": 6, "ok": false, "error": "device … does not support 'statusLed'" }
+```
+
+### `stream.start`
+Returns the URLs for a camera's live video. **Does not open the camera** — connecting to the URL is
+what starts it; disconnecting stops it. *(Requires auth.)*
+
+```jsonc
+// →
+{ "id": 7, "cmd": "stream.start", "sn": "EXAMPLE-CAM-0001" }
+// ←
+{
+  "id": 7, "ok": true,
+  "path": "/stream/EXAMPLE-CAM-0001",
+  "http": "http://127.0.0.1:3000/stream/EXAMPLE-CAM-0001",
+  "rtsp": "rtsp://127.0.0.1:8554/EXAMPLE-CAM-0001"
+}
+```
+
+### `stream.stop`
+Advisory only — the media connection closing is the real "stop". *(Requires auth.)*
+
+```jsonc
+// →  { "id": 8, "cmd": "stream.stop", "sn": "…" }
+// ←  { "id": 8, "ok": true }
+```
+
+### Errors
+- Unknown command → `{ "id": n, "ok": false, "error": "unknown cmd: …" }`
+- A device command before auth → `{ "id": n, "ok": false, "error": "not authenticated — query auth.status and complete 2FA/captcha first" }`
+- Malformed frame → `{ "ok": false, "error": "bad json" }` (no `id`)
+
+---
+
+## Events (unsolicited)
+
+### Lifecycle
+| event | payload | when |
+| --- | --- | --- |
+| `hello` | `{ schemaVersion, auth: { state, … } }` | on connect |
+| `auth` | `{ state, image?, method?, retry? }` | auth state changed |
+| `ready` | `{ schemaVersion }` | login complete + devices/go2rtc up |
+
+```json
+{ "event": "hello", "schemaVersion": 1, "auth": { "state": "ok" } }
+{ "event": "auth", "state": "require_2fa", "method": "email" }
+{ "event": "ready", "schemaVersion": 1 }
+```
+
+### Device events (forwarded from the SDK, broadcast to all clients)
+Each carries the SDK's event payload (typically `deviceSn` / `stationSn` plus event-specific fields).
+
+```json
+{ "event": "motion", "deviceSn": "EXAMPLE-CAM…", "stationSn": "EXAMPLE-HB…" }
+{ "event": "contactState", "deviceSn": "EXAMPLE-SENSOR…", "open": true }
+{ "event": "batteryLevel", "deviceSn": "EXAMPLE-CAM…", "to": "74" }
+{ "event": "doorbellPress", "deviceSn": "EXAMPLE-DOORBELL…" }
+```
+
+Full set: `motion`, `personDetected`, `strangerDetected`, `doorbellPress`, `petDetection`,
+`packageDelivered`, `packageTaken`, `packageStranded`, `soundDetected`, `cryingDetected`,
+`vehicleDetected`, `dogDetected`, `armingModeChanged`, `alarm`, `lockState`, `contactState`,
+`batteryLevel`, `batteryAlert`, `ptzNotify`, `smartLightState`.
+
+---
+
+## Sibling HTTP endpoints
+
+| method + path | returns |
+| --- | --- |
+| `GET /healthz` | `{ ok, schemaVersion, auth: { state }, streaming: [sn,…] }` — always available (even before auth) |
+| `GET /snapshot/<sn>` | a JPEG still (`image/jpeg`). *Requires auth.* |
+| `GET /stream/<sn>` | live Annex-B H.264/H.265 (`video/H264`) — what go2rtc pulls. *Requires auth.* |
+
+go2rtc (bundled) turns `/stream/<sn>` into RTSP / WebRTC / MSE / HLS, so the frontend never speaks the
+raw video protocol.
+
+---
+
+## Not yet exposed
+- Capability **action** verbs (PTZ move, light on/off, siren test, talkback) — only property writes via
+  `device.set` today.
+- Per-device event subscription/filtering (events broadcast to all clients).
+- Audio / recording / timelapse.
