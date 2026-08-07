@@ -108,19 +108,19 @@ function startGo2rtc() {
 /**
  * Build the host-facing summary of one device: identity + capabilities + a stream path for a camera.
  *
- * `name` is the user's device name (`device_name`, e.g. "Dining room") from the cloud record, NOT the
- * resolved model that `describe()` returns (e.g. the model code) — that's what a host wants to show. `friendly`
- * is passed in from the device-list pass; the single-device path looks it up.
+ * describe() now states identity directly: `name` is the owner's device name (falling back to the
+ * product name when unnamed), `model` is the T-code, `modelName` is the product. A host shows `name`
+ * as the device name and `model`/`modelName` as its model — no cross-referencing the device list.
  */
-async function describeDevice(sn, friendly) {
+async function describeDevice(sn) {
   const dev = await eufy.getDevice(sn);
   const m = dev.describe();
-  if (!friendly) friendly = (await eufy.getDevices()).find((d) => d.sn === sn)?.name;
   const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
   return {
     sn: m.sn,
-    name: friendly || m.name, // user-given name wins; the model is only a fallback
-    model: m.name, // keep the model available too, so a host can show both if it wants
+    name: m.name, // owner's device name (e.g. "Dining room"), from device_name
+    model: m.model || m.modelName, // T-code (e.g. "T8410"); product name as fallback
+    modelName: m.modelName, // product display name (e.g. "Indoor Cam Pan & Tilt")
     codec: m.codec,
     capabilities: m.capabilities,
     stream: isCamera ? `/stream/${m.sn}` : undefined,
@@ -130,7 +130,7 @@ async function describeDevice(sn, friendly) {
 async function deviceList() {
   const devices = await eufy.getDevices();
   return Promise.all(
-    devices.map((d) => describeDevice(d.sn, d.name).catch((e) => ({ sn: d.sn, error: String(e?.message ?? e) }))),
+    devices.map((d) => describeDevice(d.sn).catch((e) => ({ sn: d.sn, error: String(e?.message ?? e) }))),
   );
 }
 

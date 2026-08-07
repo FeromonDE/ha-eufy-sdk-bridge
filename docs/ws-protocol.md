@@ -89,16 +89,21 @@ Every device the account exposes. *(Requires `auth.state == "ok"`.)*
     {
       "sn": "EXAMPLE-CAM-0001",
       "name": "Living Room Camera",
+      "model": "T8410",
+      "modelName": "Indoor Cam Pan & Tilt",
       "codec": "camera",
       "capabilities": ["video","snapshot","motion","camera","rtsp","battery","light","ptz","audio","info"],
       "stream": "/stream/EXAMPLE-CAM-0001"
     },
-    { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "codec": "sensor",
+    { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "model": "T8900",
+      "modelName": "Entry Sensor", "codec": "sensor",
       "capabilities": ["contact","battery","info"] }
   ]
 }
 ```
 
+- `name` is the owner's device name (from `device_name`); it falls back to `modelName` when the device is unnamed.
+- `model` is the T-code (e.g. `T8410`); `modelName` is the product display name (e.g. `Indoor Cam Pan & Tilt`).
 - `stream` is present only on devices with live video (cameras/doorbells).
 - A device that failed to resolve appears as `{ "sn": "…", "error": "…" }`.
 
