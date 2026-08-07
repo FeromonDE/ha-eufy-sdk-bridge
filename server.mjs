@@ -85,11 +85,14 @@ async function completeBoot() {
   booting = true;
   try {
     for (const e of FORWARDED_EVENTS) eufy.on(e, (payload) => broadcast({ event: e, ...payload }));
-    const devices = await eufy.getDevices();
-    await writeGo2rtcConfig(cfg, devices);
+    // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
+    // gave a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to
+    // "other"), so go2rtc registers exactly the cameras HA shows.
+    const summaries = await deviceList();
+    const cams = await writeGo2rtcConfig(cfg, summaries);
     startGo2rtc();
     ready = true;
-    console.log(`[bridge] ready — ${devices.length} devices`);
+    console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
   } finally {
     booting = false;
