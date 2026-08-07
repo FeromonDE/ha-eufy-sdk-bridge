@@ -158,6 +158,24 @@ device's capabilities expose (e.g. `statusLed`, `nightVision`, guard-mode `mode`
 { "id": 6, "ok": false, "error": "device … does not support 'statusLed'" }
 ```
 
+### `config.get` / `config.set`
+Read or change the **cloud poll interval** (`pollMs`, milliseconds) at runtime — how often the bridge
+re-reads device state from the cloud. `0` disables polling. Unset at startup → the SDK default
+(600000 = 10 min); the `EUFY_POLL_MS` env var sets the startup value. *(Requires auth.)*
+
+```jsonc
+// →  { "id": 9, "cmd": "config.get" }
+// ←  { "id": 9, "ok": true, "pollMs": 600000 }
+
+// →  { "id": 10, "cmd": "config.set", "pollMs": 120000 }   // poll every 2 min
+// ←  { "id": 10, "ok": true, "pollMs": 120000 }
+// invalid →
+{ "id": 10, "ok": false, "error": "pollMs must be a non-negative number (ms)" }
+```
+
+Faster polling means fresher state but more cloud traffic; the cloud itself only refreshes these
+values on the order of minutes, so intervals below ~1 min mostly add load without adding freshness.
+
 ### `stream.start`
 Returns the URLs for a camera's live video. **Does not open the camera** — connecting to the URL is
 what starts it; disconnecting stops it. *(Requires auth.)*

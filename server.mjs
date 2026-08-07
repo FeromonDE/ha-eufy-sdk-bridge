@@ -28,6 +28,9 @@ const cfg = {
   session: process.env.EUFY_SESSION || "./data/.eufy-session.json",
   go2rtcConfig: process.env.GO2RTC_CONFIG || "./go2rtc.yaml",
   selfHost: process.env.BRIDGE_SELF_HOST || "127.0.0.1",
+  // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). A frontend can also change
+  // it live via the config.set WS command. 0 disables polling.
+  pollMs: process.env.EUFY_POLL_MS ? Number(process.env.EUFY_POLL_MS) : undefined,
 };
 
 if (!cfg.email || !cfg.password) {
@@ -48,6 +51,7 @@ const eufy = new EufyMega({
   password: cfg.password,
   countryCode: cfg.country,
   store: new FileSessionStore(cfg.session),
+  pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
 });
 eufy.on("error", (e) => console.error(`[bridge] sdk error: ${e?.message ?? e}`));
 
@@ -251,6 +255,8 @@ async function handleMessage(ws, raw) {
       case "device.state":
       case "device.properties":
       case "device.set":
+      case "config.get":
+      case "config.set":
       case "stream.start":
       case "stream.stop":
         if (!ready) return fail("not authenticated — query auth.status and complete 2FA/captcha first");
@@ -268,6 +274,16 @@ async function handleMessage(ws, raw) {
       case "device.set": {
         await eufy.setProperty(msg.sn, msg.name, msg.value);
         return reply({});
+      }
+      case "config.get":
+        // Current effective cloud poll interval (ms). 0 means polling is disabled.
+        return reply({ pollMs: eufy.pollIntervalMs });
+      case "config.set": {
+        // Change the cloud poll interval live. Expect a non-negative integer (ms); 0 disables.
+        const ms = Number(msg.pollMs);
+        if (!Number.isFinite(ms) || ms < 0) return fail("pollMs must be a non-negative number (ms)");
+        eufy.setPollInterval(ms);
+        return reply({ pollMs: eufy.pollIntervalMs });
       }
       case "stream.start":
         // Returns URLs; does NOT open the camera — the media connection does that.
