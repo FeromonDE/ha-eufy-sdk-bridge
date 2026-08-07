@@ -28,6 +28,9 @@ const cfg = {
   session: process.env.EUFY_SESSION || "./data/.eufy-session.json",
   go2rtcConfig: process.env.GO2RTC_CONFIG || "./go2rtc.yaml",
   selfHost: process.env.BRIDGE_SELF_HOST || "127.0.0.1",
+  // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). A frontend can also change
+  // it live via the config.set WS command. 0 disables polling.
+  pollMs: process.env.EUFY_POLL_MS ? Number(process.env.EUFY_POLL_MS) : undefined,
 };
 
 if (!cfg.email || !cfg.password) {
@@ -48,6 +51,7 @@ const eufy = new EufyMega({
   password: cfg.password,
   countryCode: cfg.country,
   store: new FileSessionStore(cfg.session),
+  pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
 });
 eufy.on("error", (e) => console.error(`[bridge] sdk error: ${e?.message ?? e}`));
 
@@ -81,11 +85,14 @@ async function completeBoot() {
   booting = true;
   try {
     for (const e of FORWARDED_EVENTS) eufy.on(e, (payload) => broadcast({ event: e, ...payload }));
-    const devices = await eufy.getDevices();
-    await writeGo2rtcConfig(cfg, devices);
+    // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
+    // gave a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to
+    // "other"), so go2rtc registers exactly the cameras HA shows.
+    const summaries = await deviceList();
+    const cams = await writeGo2rtcConfig(cfg, summaries);
     startGo2rtc();
     ready = true;
-    console.log(`[bridge] ready — ${devices.length} devices`);
+    console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
   } finally {
     booting = false;
@@ -108,29 +115,55 @@ function startGo2rtc() {
 /**
  * Build the host-facing summary of one device: identity + capabilities + a stream path for a camera.
  *
- * `name` is the user's device name (`device_name`, e.g. "Dining room") from the cloud record, NOT the
- * resolved model that `describe()` returns (e.g. the model code) — that's what a host wants to show. `friendly`
- * is passed in from the device-list pass; the single-device path looks it up.
+ * describe() now states identity directly: `name` is the owner's device name (falling back to the
+ * product name when unnamed), `model` is the T-code, `modelName` is the product. A host shows `name`
+ * as the device name and `model`/`modelName` as its model — no cross-referencing the device list.
  */
-async function describeDevice(sn, friendly) {
+async function describeDevice(sn) {
   const dev = await eufy.getDevice(sn);
   const m = dev.describe();
-  if (!friendly) friendly = (await eufy.getDevices()).find((d) => d.sn === sn)?.name;
   const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
   return {
     sn: m.sn,
-    name: friendly || m.name, // user-given name wins; the model is only a fallback
-    model: m.name, // keep the model available too, so a host can show both if it wants
+    name: m.name, // owner's device name (e.g. "Dining room"), from device_name
+    model: m.model || m.modelName, // T-code (e.g. "T8410"); product name as fallback
+    modelName: m.modelName, // product display name (e.g. "Indoor Cam Pan & Tilt")
     codec: m.codec,
     capabilities: m.capabilities,
+    state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
     stream: isCamera ? `/stream/${m.sn}` : undefined,
+    canReboot: m.codec === "station", // HomeBase-only; drives a Reboot button in HA
   };
+}
+
+/** Live property values as a flat `{ name: value }` map (reading schedules a background refresh). */
+function propertyState(dev) {
+  const out = {};
+  for (const [name, pv] of Object.entries(dev.getProperties())) out[name] = pv.value;
+  return out;
+}
+
+/**
+ * The device's property manifest — the host-relevant half of each PropertySpec, so a frontend can
+ * build the right entity (writable bool → switch, enum → select, number → number, else sensor)
+ * without knowing eufy wire ids. Wire-only fields (paramType, decode, aliases) are omitted.
+ */
+function propertySpecs(dev) {
+  return (dev.properties ?? []).map((p) => ({
+    name: p.name,
+    type: p.type, // "bool" | "number" | "string" | "enum"
+    unit: p.unit, // "%", "°C", "dBm", …
+    kind: p.kind, // percent | celsius | dbm | seconds | …
+    writable: p.writable, // a setter exists (device.set accepts it)
+    enumValues: p.enumValues, // { raw: label } for enums
+    description: p.description,
+  }));
 }
 
 async function deviceList() {
   const devices = await eufy.getDevices();
   return Promise.all(
-    devices.map((d) => describeDevice(d.sn, d.name).catch((e) => ({ sn: d.sn, error: String(e?.message ?? e) }))),
+    devices.map((d) => describeDevice(d.sn).catch((e) => ({ sn: d.sn, error: String(e?.message ?? e) }))),
   );
 }
 
@@ -224,7 +257,11 @@ async function handleMessage(ws, raw) {
       // ── device control (require auth) ──
       case "devices.list":
       case "device.state":
+      case "device.properties":
       case "device.set":
+      case "device.reboot":
+      case "config.get":
+      case "config.set":
       case "stream.start":
       case "stream.stop":
         if (!ready) return fail("not authenticated — query auth.status and complete 2FA/captcha first");
@@ -235,9 +272,28 @@ async function handleMessage(ws, raw) {
     switch (cmd) {
       case "devices.list": return reply({ devices: await deviceList() });
       case "device.state": return reply({ device: await describeDevice(msg.sn) });
+      case "device.properties": {
+        const dev = await eufy.getDevice(msg.sn);
+        return reply({ sn: msg.sn, properties: propertySpecs(dev) });
+      }
       case "device.set": {
         await eufy.setProperty(msg.sn, msg.name, msg.value);
         return reply({});
+      }
+      case "device.reboot": {
+        // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
+        await eufy.reboot(msg.sn);
+        return reply({});
+      }
+      case "config.get":
+        // Current effective cloud poll interval (ms). 0 means polling is disabled.
+        return reply({ pollMs: eufy.pollIntervalMs });
+      case "config.set": {
+        // Change the cloud poll interval live. Expect a non-negative integer (ms); 0 disables.
+        const ms = Number(msg.pollMs);
+        if (!Number.isFinite(ms) || ms < 0) return fail("pollMs must be a non-negative number (ms)");
+        eufy.setPollInterval(ms);
+        return reply({ pollMs: eufy.pollIntervalMs });
       }
       case "stream.start":
         // Returns URLs; does NOT open the camera — the media connection does that.

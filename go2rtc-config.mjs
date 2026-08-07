@@ -9,8 +9,10 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-/** A device that carries live video — the SDK classes cameras + doorbells as `deviceClass: "camera"`. */
-const isCamera = (d) => d.deviceClass === "camera";
+// A device that carries live video: a describeDevice() summary with a `stream` path (capabilities
+// include camera/video). This matches what HA turns into a camera entity — using deviceClass here
+// would miss a camera the SDK downgrades to "other" for sitting behind a HomeBase (not direct P2P).
+const isCamera = (d) => Boolean(d.stream);
 
 export async function writeGo2rtcConfig(cfg, devices) {
   const cams = devices.filter(isCamera);

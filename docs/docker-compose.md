@@ -92,6 +92,7 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `EUFY_COUNTRY` | `GB` | two-letter account country (routes the region) |
 | `BRIDGE_HOST` | `0.0.0.0` | interface the WS/HTTP binds to |
 | `BRIDGE_PORT` | `3000` | WS/HTTP control port |
+| `EUFY_POLL_MS` | `600000` (10 min) | how often the bridge polls the cloud for device state; `0` disables. Also changeable live from the HA integration / the `config.set` WS command |
 | `EUFY_SESSION` | `/app/data/.eufy-session.json` | where the login token is persisted |
 | `GO2RTC_CONFIG` | `/app/data/go2rtc.yaml` | generated from the live device list at startup |
 

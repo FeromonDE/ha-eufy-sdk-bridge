@@ -89,28 +89,61 @@ Every device the account exposes. *(Requires `auth.state == "ok"`.)*
     {
       "sn": "EXAMPLE-CAM-0001",
       "name": "Living Room Camera",
+      "model": "T8410",
+      "modelName": "Indoor Cam Pan & Tilt",
       "codec": "camera",
       "capabilities": ["video","snapshot","motion","camera","rtsp","battery","light","ptz","audio","info"],
+      "state": { "battery": 74, "motion": false, "light": true, "statusLed": true },
       "stream": "/stream/EXAMPLE-CAM-0001"
     },
-    { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "codec": "sensor",
-      "capabilities": ["contact","battery","info"] }
+    { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "model": "T8900",
+      "modelName": "Entry Sensor", "codec": "sensor",
+      "capabilities": ["contact","battery","info"],
+      "state": { "contact": true, "battery": 88 } }
   ]
 }
 ```
 
+- `name` is the owner's device name (from `device_name`); it falls back to `modelName` when the device is unnamed.
+- `model` is the T-code (e.g. `T8410`); `modelName` is the product display name (e.g. `Indoor Cam Pan & Tilt`).
+- `state` is a flat `{ property: value }` map of the device's **current** values; reading it schedules a background refresh, and semantic events (below) push changes between reads.
 - `stream` is present only on devices with live video (cameras/doorbells).
 - A device that failed to resolve appears as `{ "sn": "…", "error": "…" }`.
 
 ### `device.state`
-The same shape as one `devices.list` entry, for a single device. *(Requires auth.)*
+The same shape as one `devices.list` entry, for a single device (identity + capabilities + live `state`). *(Requires auth.)*
 
 ```jsonc
 // →
 { "id": 5, "cmd": "device.state", "sn": "EXAMPLE-CAM-0001" }
 // ←
-{ "id": 5, "ok": true, "device": { "sn": "…", "name": "…", "codec": "camera", "capabilities": ["…"], "stream": "/stream/…" } }
+{ "id": 5, "ok": true, "device": { "sn": "…", "name": "…", "codec": "camera", "capabilities": ["…"], "state": { "battery": 74, … }, "stream": "/stream/…" } }
 ```
+
+### `device.properties`
+The device's **property manifest** — one entry per property, with enough metadata for a frontend to
+build the right entity without knowing eufy wire ids. Static per device; fetch once at setup.
+*(Requires auth.)*
+
+```jsonc
+// →
+{ "id": 9, "cmd": "device.properties", "sn": "EXAMPLE-CAM-0001" }
+// ←
+{
+  "id": 9, "ok": true, "sn": "EXAMPLE-CAM-0001",
+  "properties": [
+    { "name": "battery",   "type": "number", "unit": "%",   "kind": "percent", "writable": false },
+    { "name": "statusLed", "type": "bool",                                       "writable": true  },
+    { "name": "motion",    "type": "bool",                                       "writable": false },
+    { "name": "workingMode","type": "enum",  "writable": true,
+      "enumValues": { "0": "Optimal battery life", "1": "Optimal surveillance", "2": "Custom" } }
+  ]
+}
+```
+
+Map an entry to an entity: `writable` + `bool` → **switch**, `enum` → **select** (`enumValues` = raw→label),
+`number` → **number** (`unit`/`kind` for display), everything else → **sensor**. Pair with the live value
+from `state` (same `name`).
 
 ### `device.set`
 Write a property (maps to the SDK's `setProperty`). The valid `name`s are the writable properties a
@@ -124,6 +157,24 @@ device's capabilities expose (e.g. `statusLed`, `nightVision`, guard-mode `mode`
 // unsupported property / device →
 { "id": 6, "ok": false, "error": "device … does not support 'statusLed'" }
 ```
+
+### `config.get` / `config.set`
+Read or change the **cloud poll interval** (`pollMs`, milliseconds) at runtime — how often the bridge
+re-reads device state from the cloud. `0` disables polling. Unset at startup → the SDK default
+(600000 = 10 min); the `EUFY_POLL_MS` env var sets the startup value. *(Requires auth.)*
+
+```jsonc
+// →  { "id": 9, "cmd": "config.get" }
+// ←  { "id": 9, "ok": true, "pollMs": 600000 }
+
+// →  { "id": 10, "cmd": "config.set", "pollMs": 120000 }   // poll every 2 min
+// ←  { "id": 10, "ok": true, "pollMs": 120000 }
+// invalid →
+{ "id": 10, "ok": false, "error": "pollMs must be a non-negative number (ms)" }
+```
+
+Faster polling means fresher state but more cloud traffic; the cloud itself only refreshes these
+values on the order of minutes, so intervals below ~1 min mostly add load without adding freshness.
 
 ### `stream.start`
 Returns the URLs for a camera's live video. **Does not open the camera** — connecting to the URL is
@@ -202,7 +253,8 @@ raw video protocol.
 ---
 
 ## Not yet exposed
-- Capability **action** verbs (PTZ move, light on/off, siren test, talkback) — only property writes via
-  `device.set` today.
+- Capability **action** verbs (PTZ move, siren test, talkback) — only property writes via `device.set`
+  today.
+- Guard / station security mode (arm home/away/disarm).
 - Per-device event subscription/filtering (events broadcast to all clients).
 - Audio / recording / timelapse.
