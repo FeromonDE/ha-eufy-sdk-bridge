@@ -132,6 +132,7 @@ async function describeDevice(sn) {
     capabilities: m.capabilities,
     state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
     stream: isCamera ? `/stream/${m.sn}` : undefined,
+    canReboot: m.codec === "station", // HomeBase-only; drives a Reboot button in HA
   };
 }
 
@@ -258,6 +259,7 @@ async function handleMessage(ws, raw) {
       case "device.state":
       case "device.properties":
       case "device.set":
+      case "device.reboot":
       case "config.get":
       case "config.set":
       case "stream.start":
@@ -276,6 +278,11 @@ async function handleMessage(ws, raw) {
       }
       case "device.set": {
         await eufy.setProperty(msg.sn, msg.name, msg.value);
+        return reply({});
+      }
+      case "device.reboot": {
+        // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
+        await eufy.reboot(msg.sn);
         return reply({});
       }
       case "config.get":
