@@ -123,8 +123,33 @@ async function describeDevice(sn) {
     modelName: m.modelName, // product display name (e.g. "Indoor Cam Pan & Tilt")
     codec: m.codec,
     capabilities: m.capabilities,
+    state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
     stream: isCamera ? `/stream/${m.sn}` : undefined,
   };
+}
+
+/** Live property values as a flat `{ name: value }` map (reading schedules a background refresh). */
+function propertyState(dev) {
+  const out = {};
+  for (const [name, pv] of Object.entries(dev.getProperties())) out[name] = pv.value;
+  return out;
+}
+
+/**
+ * The device's property manifest — the host-relevant half of each PropertySpec, so a frontend can
+ * build the right entity (writable bool → switch, enum → select, number → number, else sensor)
+ * without knowing eufy wire ids. Wire-only fields (paramType, decode, aliases) are omitted.
+ */
+function propertySpecs(dev) {
+  return (dev.properties ?? []).map((p) => ({
+    name: p.name,
+    type: p.type, // "bool" | "number" | "string" | "enum"
+    unit: p.unit, // "%", "°C", "dBm", …
+    kind: p.kind, // percent | celsius | dbm | seconds | …
+    writable: p.writable, // a setter exists (device.set accepts it)
+    enumValues: p.enumValues, // { raw: label } for enums
+    description: p.description,
+  }));
 }
 
 async function deviceList() {
@@ -224,6 +249,7 @@ async function handleMessage(ws, raw) {
       // ── device control (require auth) ──
       case "devices.list":
       case "device.state":
+      case "device.properties":
       case "device.set":
       case "stream.start":
       case "stream.stop":
@@ -235,6 +261,10 @@ async function handleMessage(ws, raw) {
     switch (cmd) {
       case "devices.list": return reply({ devices: await deviceList() });
       case "device.state": return reply({ device: await describeDevice(msg.sn) });
+      case "device.properties": {
+        const dev = await eufy.getDevice(msg.sn);
+        return reply({ sn: msg.sn, properties: propertySpecs(dev) });
+      }
       case "device.set": {
         await eufy.setProperty(msg.sn, msg.name, msg.value);
         return reply({});
