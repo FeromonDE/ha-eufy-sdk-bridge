@@ -179,15 +179,39 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (!ready) return json(res, 503, { error: "not authenticated", auth: authStatus() });
 
+  // A current still: a fresh live burst, falling back to the retained push thumbnail.
   if (kind === "snapshot" && sn) {
     try {
       const cam = (await eufy.getDevice(sn)).camera?.();
-      if (!cam?.snapshot) return json(res, 404, { error: "no camera on this device" });
-      const { jpeg } = await cam.snapshot();
+      if (!cam) return json(res, 404, { error: "no camera on this device" });
+      let jpeg;
+      try {
+        ({ jpeg } = await cam.snapshotLive());
+      } catch {
+        jpeg = await cam.snapshotStored?.(); // may throw when nothing is retained
+      }
+      if (!jpeg) return json(res, 404, { error: "no image available" });
       res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
       return res.end(jpeg);
     } catch (e) {
       return json(res, 502, { error: String(e?.message ?? e) });
+    }
+  }
+
+  // The latest detection thumbnail the SDK downloaded + retained (no live capture). 404 until
+  // an event with a validated thumbnail has arrived over push.
+  if (kind === "event-image" && sn) {
+    try {
+      const cam = (await eufy.getDevice(sn)).camera?.();
+      if (!cam?.snapshotStored) return json(res, 404, { error: "no camera on this device" });
+      const jpeg = await cam.snapshotStored();
+      res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
+      return res.end(jpeg);
+    } catch (e) {
+      // StoredSnapshotUnavailableError (nothing retained yet) reads as a 404, not a 502.
+      // Surface its `reason` (not-observed / pending / download-failed / invalid-image) so a
+      // caller can tell "no event yet" from "the download/decrypt failed".
+      return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
     }
   }
 
