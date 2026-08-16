@@ -209,7 +209,9 @@ const httpServer = http.createServer(async (req, res) => {
       return res.end(jpeg);
     } catch (e) {
       // StoredSnapshotUnavailableError (nothing retained yet) reads as a 404, not a 502.
-      return json(res, 404, { error: String(e?.message ?? e) });
+      // Surface its `reason` (not-observed / pending / download-failed / invalid-image) so a
+      // caller can tell "no event yet" from "the download/decrypt failed".
+      return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
     }
   }
 
