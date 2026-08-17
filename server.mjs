@@ -52,6 +52,48 @@ const FORWARDED_EVENTS = [
   "contactState", "batteryLevel", "batteryAlert", "ptzNotify", "smartLightState",
 ];
 
+/**
+ * person_id -> { name, familiar } — the HomeBase edge-AI face roster, built once at startup.
+ *
+ * A `personDetected` push only carries a numeric `person_id` (== the roster's person_id, verified
+ * against the app), NOT the recognised person's name. The name lives in the on-HomeBase
+ * `person_basic_info` table, reachable over P2P. We resolve it here so `personDetected` events can
+ * carry a real `person_name`. `stranger\d+` names are auto-assigned to unfamiliar faces.
+ */
+const faceNames = new Map();
+
+/** Parse `person_basic_info` rows out of a reassembled P2P DB reply (name precedes person_id). */
+function parseFaceRoster(text) {
+  const rows = text.matchAll(
+    /\{"age":\d+,[^{}]*?"name":"([^"]*)"[^{}]*?"person_id":(\d+),"relation":"([^"]*)"/g,
+  );
+  const out = new Map();
+  for (const m of rows) {
+    const id = Number(m[2]);
+    if (!out.has(id)) out.set(id, { name: m[1], familiar: !/^stranger\d+$/.test(m[1]) });
+  }
+  return out;
+}
+
+/**
+ * Attach the recognised person's name to a `personDetected` payload.
+ *
+ * The push carries only `person_id`; look it up in the roster to add `person_name` + `recognized`.
+ * `person_id <= 0` (or -1) means "a person, but no face match" → left unresolved (recognized:false).
+ * Unmapped positive ids are logged so a first real recognition confirms the id-space live.
+ */
+function enrichPersonName(event, payload) {
+  if (event !== "personDetected") return payload;
+  const pid = Number(payload?.person_id);
+  if (!Number.isFinite(pid) || pid <= 0) return { ...payload, recognized: false };
+  const rec = faceNames.get(pid);
+  if (!rec) {
+    console.log(`[bridge] personDetected person_id=${pid} not in roster (${faceNames.size} known)`);
+    return { ...payload, recognized: false };
+  }
+  return { ...payload, person_name: rec.name, recognized: rec.familiar };
+}
+
 const eufy = new EufyMega({
   email: cfg.email,
   password: cfg.password,
@@ -177,6 +219,46 @@ function firstJsonObject(text) {
 }
 
 /**
+ * Build the face-recognition roster (`faceNames`) at startup by reading `person_basic_info` off each
+ * connected HomeBase over P2P (CMD_DATABASE 1306 / inner cmd 10000, mChannel 255). Faces are
+ * account-wide, so every station's rows merge into one map. Best-effort: on any failure the map just
+ * stays smaller and `personDetected` events fall back to "Unknown".
+ */
+async function warmFaceRoster() {
+  try {
+    const devs = await eufy.getDevices();
+    const accountId =
+      devs.find((d) => d.raw?.member?.admin_user_id)?.raw?.member?.admin_user_id ?? eufy.api?.auth?.userId ?? "";
+    let sessions = eufy.getP2pSessions();
+    for (let i = 0; i < 20 && sessions.size === 0; i++) {
+      await sleep(1000);
+      sessions = eufy.getP2pSessions();
+    }
+    for (const [, session] of sessions) {
+      for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500);
+      if (!session.isConnected) continue;
+
+      let chunk = "";
+      const onChunk = ({ text }) => (chunk += text);
+      session.on("dbChunk", onChunk);
+      session.requestFaces({ accountId });
+      setTimeout(() => session.isConnected && session.requestFaces({ accountId }), 1500);
+      await sleep(6000);
+      session.off?.("dbChunk", onChunk);
+
+      let added = 0;
+      for (const [id, rec] of parseFaceRoster(chunk)) {
+        if (!faceNames.has(id)) added++;
+        faceNames.set(id, rec);
+      }
+      if (added) console.log(`[bridge] face roster: +${added} person(s) (${faceNames.size} total)`);
+    }
+  } catch (e) {
+    console.error(`[bridge] warm face roster failed: ${e?.message ?? e}`);
+  }
+}
+
+/**
  * Warm the "Last event" thumbnails at startup from LOCAL (HomeBase) storage, so the images are
  * populated on first HA load even before any live push. Per connected station: query the latest
  * event per device over P2P (history_record_info, cmd 10013 / mChannel 0), then requestImage() each
@@ -245,7 +327,7 @@ async function completeBoot() {
     for (const e of FORWARDED_EVENTS)
       eufy.on(e, (payload) => {
         bumpActivity();
-        broadcast({ event: e, ...payload });
+        broadcast({ event: e, ...enrichPersonName(e, payload) });
       });
     // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
     // gave a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to
@@ -258,7 +340,12 @@ async function completeBoot() {
     watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
-    void warmLastEventImages(); // populate "Last event" from local HomeBase storage on first load
+    // Both read the P2P DB via a shared `dbChunk` stream — run sequentially so their accumulators
+    // don't cross-contaminate. Non-blocking so `ready` isn't held up.
+    void (async () => {
+      await warmFaceRoster(); // resolve person_id -> name for face-recognition events
+      await warmLastEventImages(); // populate "Last event" from local HomeBase storage on first load
+    })();
   } finally {
     booting = false;
   }
