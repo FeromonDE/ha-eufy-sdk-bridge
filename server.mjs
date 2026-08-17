@@ -79,12 +79,59 @@ async function applyLogin(result) {
 }
 
 let booting = false;
+// ── realtime liveness watchdog ───────────────────────────────────────────────────────────────────
+// The SDK's poll loop re-arms via `pollOnce().finally(schedulePoll)`, so a cloud call that HANGS (no
+// timeout, half-open socket) never settles → the loop stalls forever while the WS server stays up and
+// serves the last cached state. `deviceState` fires on every healthy poll (proof-of-life even when no
+// value changed), so its silence is the stall signal. On a stall we re-establish realtime in place
+// (disconnect → login, keeping the WS server + HA connections), and exit for a clean restart if that
+// fails. Wire the container with `restart: unless-stopped` so the exit path self-heals too.
+let lastActivity = Date.now();
+let recovering = false;
+let watchdogTimer = null;
+const bumpActivity = () => {
+  lastActivity = Date.now();
+};
+/** No poll heartbeat for max(3 polls, 30 min) ⇒ treat the realtime/poll channel as stalled. */
+function stallThresholdMs() {
+  return Math.max(3 * (eufy.pollIntervalMs || 600_000), 30 * 60_000);
+}
+async function watchdogTick() {
+  if (!ready || recovering) return;
+  const idleMs = Date.now() - lastActivity;
+  if (idleMs < stallThresholdMs()) return;
+  recovering = true;
+  console.error(`[bridge] realtime/poll stalled (${Math.round(idleMs / 1000)}s idle) — re-establishing`);
+  try {
+    await eufy.disconnect();
+    const result = await eufy.login();
+    await applyLogin(result); // refreshes auth state; completeBoot is a no-op once ready
+    if (result.status !== LoginStatus.Ok) {
+      console.error(`[bridge] re-login not OK (${result.status}) — exiting for a clean restart`);
+      process.exit(1);
+    }
+    eufy.setPollInterval(eufy.pollIntervalMs); // re-arm the poll loop under the new realtime epoch
+    lastActivity = Date.now();
+    console.log("[bridge] realtime re-established after stall");
+  } catch (e) {
+    console.error(`[bridge] stall recovery failed (${e?.message ?? e}) — exiting for a clean restart`);
+    process.exit(1);
+  } finally {
+    recovering = false;
+  }
+}
+
 /** Runs once, after a successful login: wire events, write go2rtc.yaml, start go2rtc, go ready. */
 async function completeBoot() {
   if (ready || booting) return;
   booting = true;
   try {
-    for (const e of FORWARDED_EVENTS) eufy.on(e, (payload) => broadcast({ event: e, ...payload }));
+    eufy.on("deviceState", bumpActivity); // poll heartbeat — the watchdog's liveness signal
+    for (const e of FORWARDED_EVENTS)
+      eufy.on(e, (payload) => {
+        bumpActivity();
+        broadcast({ event: e, ...payload });
+      });
     // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
     // gave a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to
     // "other"), so go2rtc registers exactly the cameras HA shows.
@@ -92,6 +139,8 @@ async function completeBoot() {
     const cams = await writeGo2rtcConfig(cfg, summaries);
     startGo2rtc();
     ready = true;
+    lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
+    watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
   } finally {
@@ -175,7 +224,15 @@ const httpServer = http.createServer(async (req, res) => {
   const [, kind, sn] = url.pathname.split("/");
 
   if (url.pathname === "/healthz") {
-    return json(res, 200, { ok: true, schemaVersion: SCHEMA_VERSION, auth: authStatus(), streaming: [...streaming] });
+    const idleSec = Math.round((Date.now() - lastActivity) / 1000);
+    return json(res, 200, {
+      ok: true,
+      schemaVersion: SCHEMA_VERSION,
+      auth: authStatus(),
+      streaming: [...streaming],
+      lastActivitySec: idleSec, // seconds since the last poll heartbeat / realtime event
+      stalled: ready && idleSec * 1000 >= stallThresholdMs(),
+    });
   }
   if (!ready) return json(res, 503, { error: "not authenticated", auth: authStatus() });
 
@@ -348,6 +405,7 @@ async function main() {
 }
 
 async function shutdown() {
+  if (watchdogTimer) clearInterval(watchdogTimer);
   go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
