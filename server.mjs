@@ -10,6 +10,8 @@
 // submits the answer or re-triggers a fresh challenge. Only once logged in does it start go2rtc + serve
 // devices. Video is deliberately off the WS: connecting to the stream URL starts the camera.
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
 import { EufyMega, FileSessionStore, LoginStatus } from "@mega-yfue/eufy-sdk";
@@ -32,6 +34,10 @@ const cfg = {
   // it live via the config.set WS command. 0 disables polling.
   pollMs: process.env.EUFY_POLL_MS ? Number(process.env.EUFY_POLL_MS) : undefined,
 };
+
+// Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
+const eventImageDir = path.dirname(cfg.session);
+fs.mkdirSync(eventImageDir, { recursive: true });
 
 if (!cfg.email || !cfg.password) {
   console.error("[bridge] EUFY_EMAIL and EUFY_PASSWORD are required");
@@ -255,20 +261,30 @@ const httpServer = http.createServer(async (req, res) => {
     }
   }
 
-  // The latest detection thumbnail the SDK downloaded + retained (no live capture). 404 until
-  // an event with a validated thumbnail has arrived over push.
+  // The latest detection thumbnail the SDK downloaded + retained (no live capture). The SDK's
+  // cache is in-memory (cleared on restart / watchdog recovery), so we also persist each served
+  // thumbnail to disk and fall back to it when nothing is retained — the "Last event" image then
+  // survives restarts instead of blanking until the next detection.
   if (kind === "event-image" && sn) {
+    const file = path.join(eventImageDir, `last-event-${sn}.jpg`);
     try {
       const cam = (await eufy.getDevice(sn)).camera?.();
       if (!cam?.snapshotStored) return json(res, 404, { error: "no camera on this device" });
       const jpeg = await cam.snapshotStored();
+      fs.writeFile(file, jpeg, () => {}); // best-effort persist for restart survival
       res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
       return res.end(jpeg);
     } catch (e) {
-      // StoredSnapshotUnavailableError (nothing retained yet) reads as a 404, not a 502.
-      // Surface its `reason` (not-observed / pending / download-failed / invalid-image) so a
-      // caller can tell "no event yet" from "the download/decrypt failed".
-      return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
+      // Nothing retained live — serve the last persisted thumbnail if we have one.
+      try {
+        const cached = await fs.promises.readFile(file);
+        res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
+        return res.end(cached);
+      } catch {
+        // No live and no persisted image. Surface the SDK reason (not-observed / pending /
+        // download-failed / invalid-image) so a caller can tell "no event yet" from a failure.
+        return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
+      }
     }
   }
 
