@@ -127,6 +127,94 @@ async function watchdogTick() {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The first complete brace-balanced JSON object in a string (the P2P DB reply has trailing padding). */
+function firstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try {
+        return JSON.parse(text.slice(start, i + 1));
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Warm the "Last event" thumbnails at startup from LOCAL (HomeBase) storage, so the images are
+ * populated on first HA load even before any live push. Per connected station: query the latest
+ * event per device over P2P (history_record_info, cmd 10013 / mChannel 0), then requestImage() each
+ * on-HomeBase cover path (plain JPEG) and persist it to <data>/last-event-<sn>.jpg — which
+ * /event-image already serves. This is the only startup source for local-storage accounts (the cloud
+ * events/list + device cover_path are empty without cloud storage).
+ */
+async function warmLastEventImages() {
+  try {
+    const devs = await eufy.getDevices();
+    const accountId =
+      devs.find((d) => d.raw?.member?.admin_user_id)?.raw?.member?.admin_user_id ?? eufy.api?.auth?.userId ?? "";
+    // Sessions come up asynchronously after login — give them a moment to appear.
+    let sessions = eufy.getP2pSessions();
+    for (let i = 0; i < 20 && sessions.size === 0; i++) {
+      await sleep(1000);
+      sessions = eufy.getP2pSessions();
+    }
+    for (const [ssn, session] of sessions) {
+      for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500); // await handshake
+      if (!session.isConnected) continue;
+
+      let chunk = "";
+      const onChunk = ({ text }) => (chunk += text);
+      session.on("dbChunk", onChunk);
+      session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 });
+      setTimeout(() => session.isConnected && session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 }), 1500);
+      await sleep(6000);
+      session.off?.("dbChunk", onChunk);
+
+      const records = firstJsonObject(chunk)?.data ?? [];
+      const covers = new Map(); // device_sn -> on-HomeBase cover path
+      for (const rec of records) {
+        const p = rec?.payload?.crop_hb3_path;
+        if (rec?.device_sn && typeof p === "string" && p) covers.set(rec.device_sn, p);
+      }
+      if (!covers.size) continue;
+
+      const images = new Map(); // file -> jpeg buffer
+      const onImage = ({ file, data }) => {
+        if (data?.[0] === 0xff && data?.[1] === 0xd8) images.set(file, data);
+      };
+      session.on("image", onImage);
+      for (const [dsn, filePath] of covers) {
+        session.requestImage(filePath, { accountId });
+        for (let i = 0; i < 40 && !images.has(filePath); i++) await sleep(200); // ≤8s per image
+        const data = images.get(filePath);
+        if (data) {
+          fs.writeFileSync(path.join(eventImageDir, `last-event-${dsn}.jpg`), data);
+          console.log(`[bridge] warmed last-event image for ${dsn} (${data.length}B, local)`);
+        }
+      }
+      session.off?.("image", onImage);
+    }
+  } catch (e) {
+    console.error(`[bridge] warm last-event images failed: ${e?.message ?? e}`);
+  }
+}
+
 /** Runs once, after a successful login: wire events, write go2rtc.yaml, start go2rtc, go ready. */
 async function completeBoot() {
   if (ready || booting) return;
@@ -149,6 +237,7 @@ async function completeBoot() {
     watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
+    void warmLastEventImages(); // populate "Last event" from local HomeBase storage on first load
   } finally {
     booting = false;
   }
@@ -382,6 +471,7 @@ async function handleMessage(ws, raw) {
         await eufy.reboot(msg.sn);
         return reply({});
       }
+
       case "config.get":
         // Current effective cloud poll interval (ms). 0 means polling is disabled.
         return reply({ pollMs: eufy.pollIntervalMs });
