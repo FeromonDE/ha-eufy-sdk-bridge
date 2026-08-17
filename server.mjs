@@ -61,6 +61,19 @@ const eufy = new EufyMega({
 });
 eufy.on("error", (e) => console.error(`[bridge] sdk error: ${e?.message ?? e}`));
 
+// Push (FCM) liveness — the watchdog's poll heartbeat can't see a dead push channel (events ride
+// push, state rides poll), so track push connect/disconnect explicitly.
+let pushConnected = false;
+let pushSince = Date.now();
+eufy.on("pushConnect", () => {
+  pushConnected = true;
+  pushSince = Date.now();
+});
+eufy.on("pushDisconnect", () => {
+  pushConnected = false;
+  pushSince = Date.now();
+});
+
 // ── auth state (driven over WS) ──────────────────────────────────────────────────────────────────
 let ready = false; // logged in + booted
 let lastLogin; // the most recent LoginResult (undefined until first attempt)
@@ -102,12 +115,19 @@ const bumpActivity = () => {
 function stallThresholdMs() {
   return Math.max(3 * (eufy.pollIntervalMs || 600_000), 30 * 60_000);
 }
+const PUSH_STALL_MS = 5 * 60_000; // push down (or never up) this long ⇒ recover — events are dead.
 async function watchdogTick() {
   if (!ready || recovering) return;
   const idleMs = Date.now() - lastActivity;
-  if (idleMs < stallThresholdMs()) return;
+  const pushDeadMs = pushConnected ? 0 : Date.now() - pushSince;
+  const pollStalled = idleMs >= stallThresholdMs();
+  const pushStalled = pushDeadMs >= PUSH_STALL_MS;
+  if (!pollStalled && !pushStalled) return;
   recovering = true;
-  console.error(`[bridge] realtime/poll stalled (${Math.round(idleMs / 1000)}s idle) — re-establishing`);
+  const why = pollStalled
+    ? `poll idle ${Math.round(idleMs / 1000)}s`
+    : `push down ${Math.round(pushDeadMs / 1000)}s`;
+  console.error(`[bridge] realtime stalled (${why}) — re-establishing`);
   try {
     await eufy.disconnect();
     const result = await eufy.login();
@@ -118,6 +138,7 @@ async function watchdogTick() {
     }
     eufy.setPollInterval(eufy.pollIntervalMs); // re-arm the poll loop under the new realtime epoch
     lastActivity = Date.now();
+    pushSince = Date.now(); // give push a fresh window to reconnect before flagging it again
     console.log("[bridge] realtime re-established after stall");
   } catch (e) {
     console.error(`[bridge] stall recovery failed (${e?.message ?? e}) — exiting for a clean restart`);
@@ -327,6 +348,8 @@ const httpServer = http.createServer(async (req, res) => {
       streaming: [...streaming],
       lastActivitySec: idleSec, // seconds since the last poll heartbeat / realtime event
       stalled: ready && idleSec * 1000 >= stallThresholdMs(),
+      pushConnected, // FCM push channel — events (motion/doorbell/…) ride this
+      pushIdleSec: pushConnected ? 0 : Math.round((Date.now() - pushSince) / 1000),
     });
   }
   if (!ready) return json(res, 503, { error: "not authenticated", auth: authStatus() });
