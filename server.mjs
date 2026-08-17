@@ -10,6 +10,8 @@
 // submits the answer or re-triggers a fresh challenge. Only once logged in does it start go2rtc + serve
 // devices. Video is deliberately off the WS: connecting to the stream URL starts the camera.
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
 import { EufyMega, FileSessionStore, LoginStatus } from "@mega-yfue/eufy-sdk";
@@ -33,6 +35,10 @@ const cfg = {
   pollMs: process.env.EUFY_POLL_MS ? Number(process.env.EUFY_POLL_MS) : undefined,
 };
 
+// Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
+const eventImageDir = path.dirname(cfg.session);
+fs.mkdirSync(eventImageDir, { recursive: true });
+
 if (!cfg.email || !cfg.password) {
   console.error("[bridge] EUFY_EMAIL and EUFY_PASSWORD are required");
   process.exit(1);
@@ -46,6 +52,48 @@ const FORWARDED_EVENTS = [
   "contactState", "batteryLevel", "batteryAlert", "ptzNotify", "smartLightState",
 ];
 
+/**
+ * person_id -> { name, familiar } — the HomeBase edge-AI face roster, built once at startup.
+ *
+ * A `personDetected` push only carries a numeric `person_id` (== the roster's person_id, verified
+ * against the app), NOT the recognised person's name. The name lives in the on-HomeBase
+ * `person_basic_info` table, reachable over P2P. We resolve it here so `personDetected` events can
+ * carry a real `person_name`. `stranger\d+` names are auto-assigned to unfamiliar faces.
+ */
+const faceNames = new Map();
+
+/** Parse `person_basic_info` rows out of a reassembled P2P DB reply (name precedes person_id). */
+function parseFaceRoster(text) {
+  const rows = text.matchAll(
+    /\{"age":\d+,[^{}]*?"name":"([^"]*)"[^{}]*?"person_id":(\d+),"relation":"([^"]*)"/g,
+  );
+  const out = new Map();
+  for (const m of rows) {
+    const id = Number(m[2]);
+    if (!out.has(id)) out.set(id, { name: m[1], familiar: !/^stranger\d+$/.test(m[1]) });
+  }
+  return out;
+}
+
+/**
+ * Attach the recognised person's name to a `personDetected` payload.
+ *
+ * The push carries only `person_id`; look it up in the roster to add `person_name` + `recognized`.
+ * `person_id <= 0` (or -1) means "a person, but no face match" → left unresolved (recognized:false).
+ * Unmapped positive ids are logged so a first real recognition confirms the id-space live.
+ */
+function enrichPersonName(event, payload) {
+  if (event !== "personDetected") return payload;
+  const pid = Number(payload?.person_id);
+  if (!Number.isFinite(pid) || pid <= 0) return { ...payload, recognized: false };
+  const rec = faceNames.get(pid);
+  if (!rec) {
+    console.log(`[bridge] personDetected person_id=${pid} not in roster (${faceNames.size} known)`);
+    return { ...payload, recognized: false };
+  }
+  return { ...payload, person_name: rec.name, recognized: rec.familiar };
+}
+
 const eufy = new EufyMega({
   email: cfg.email,
   password: cfg.password,
@@ -54,6 +102,19 @@ const eufy = new EufyMega({
   pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
 });
 eufy.on("error", (e) => console.error(`[bridge] sdk error: ${e?.message ?? e}`));
+
+// Push (FCM) liveness — the watchdog's poll heartbeat can't see a dead push channel (events ride
+// push, state rides poll), so track push connect/disconnect explicitly.
+let pushConnected = false;
+let pushSince = Date.now();
+eufy.on("pushConnect", () => {
+  pushConnected = true;
+  pushSince = Date.now();
+});
+eufy.on("pushDisconnect", () => {
+  pushConnected = false;
+  pushSince = Date.now();
+});
 
 // ── auth state (driven over WS) ──────────────────────────────────────────────────────────────────
 let ready = false; // logged in + booted
@@ -79,12 +140,195 @@ async function applyLogin(result) {
 }
 
 let booting = false;
+// ── realtime liveness watchdog ───────────────────────────────────────────────────────────────────
+// The SDK's poll loop re-arms via `pollOnce().finally(schedulePoll)`, so a cloud call that HANGS (no
+// timeout, half-open socket) never settles → the loop stalls forever while the WS server stays up and
+// serves the last cached state. `deviceState` fires on every healthy poll (proof-of-life even when no
+// value changed), so its silence is the stall signal. On a stall we re-establish realtime in place
+// (disconnect → login, keeping the WS server + HA connections), and exit for a clean restart if that
+// fails. Wire the container with `restart: unless-stopped` so the exit path self-heals too.
+let lastActivity = Date.now();
+let recovering = false;
+let watchdogTimer = null;
+const bumpActivity = () => {
+  lastActivity = Date.now();
+};
+/** No poll heartbeat for max(3 polls, 30 min) ⇒ treat the realtime/poll channel as stalled. */
+function stallThresholdMs() {
+  return Math.max(3 * (eufy.pollIntervalMs || 600_000), 30 * 60_000);
+}
+const PUSH_STALL_MS = 5 * 60_000; // push down (or never up) this long ⇒ recover — events are dead.
+async function watchdogTick() {
+  if (!ready || recovering) return;
+  const idleMs = Date.now() - lastActivity;
+  const pushDeadMs = pushConnected ? 0 : Date.now() - pushSince;
+  const pollStalled = idleMs >= stallThresholdMs();
+  const pushStalled = pushDeadMs >= PUSH_STALL_MS;
+  if (!pollStalled && !pushStalled) return;
+  recovering = true;
+  const why = pollStalled
+    ? `poll idle ${Math.round(idleMs / 1000)}s`
+    : `push down ${Math.round(pushDeadMs / 1000)}s`;
+  console.error(`[bridge] realtime stalled (${why}) — re-establishing`);
+  try {
+    await eufy.disconnect();
+    const result = await eufy.login();
+    await applyLogin(result); // refreshes auth state; completeBoot is a no-op once ready
+    if (result.status !== LoginStatus.Ok) {
+      console.error(`[bridge] re-login not OK (${result.status}) — exiting for a clean restart`);
+      process.exit(1);
+    }
+    eufy.setPollInterval(eufy.pollIntervalMs); // re-arm the poll loop under the new realtime epoch
+    lastActivity = Date.now();
+    pushSince = Date.now(); // give push a fresh window to reconnect before flagging it again
+    console.log("[bridge] realtime re-established after stall");
+  } catch (e) {
+    console.error(`[bridge] stall recovery failed (${e?.message ?? e}) — exiting for a clean restart`);
+    process.exit(1);
+  } finally {
+    recovering = false;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The first complete brace-balanced JSON object in a string (the P2P DB reply has trailing padding). */
+function firstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try {
+        return JSON.parse(text.slice(start, i + 1));
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build the face-recognition roster (`faceNames`) at startup by reading `person_basic_info` off each
+ * connected HomeBase over P2P (CMD_DATABASE 1306 / inner cmd 10000, mChannel 255). Faces are
+ * account-wide, so every station's rows merge into one map. Best-effort: on any failure the map just
+ * stays smaller and `personDetected` events fall back to "Unknown".
+ */
+async function warmFaceRoster() {
+  try {
+    const devs = await eufy.getDevices();
+    const accountId =
+      devs.find((d) => d.raw?.member?.admin_user_id)?.raw?.member?.admin_user_id ?? eufy.api?.auth?.userId ?? "";
+    let sessions = eufy.getP2pSessions();
+    for (let i = 0; i < 20 && sessions.size === 0; i++) {
+      await sleep(1000);
+      sessions = eufy.getP2pSessions();
+    }
+    for (const [, session] of sessions) {
+      for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500);
+      if (!session.isConnected) continue;
+
+      let chunk = "";
+      const onChunk = ({ text }) => (chunk += text);
+      session.on("dbChunk", onChunk);
+      session.requestFaces({ accountId });
+      setTimeout(() => session.isConnected && session.requestFaces({ accountId }), 1500);
+      await sleep(6000);
+      session.off?.("dbChunk", onChunk);
+
+      let added = 0;
+      for (const [id, rec] of parseFaceRoster(chunk)) {
+        if (!faceNames.has(id)) added++;
+        faceNames.set(id, rec);
+      }
+      if (added) console.log(`[bridge] face roster: +${added} person(s) (${faceNames.size} total)`);
+    }
+  } catch (e) {
+    console.error(`[bridge] warm face roster failed: ${e?.message ?? e}`);
+  }
+}
+
+/**
+ * Warm the "Last event" thumbnails at startup from LOCAL (HomeBase) storage, so the images are
+ * populated on first HA load even before any live push. Per connected station: query the latest
+ * event per device over P2P (history_record_info, cmd 10013 / mChannel 0), then requestImage() each
+ * on-HomeBase cover path (plain JPEG) and persist it to <data>/last-event-<sn>.jpg — which
+ * /event-image already serves. This is the only startup source for local-storage accounts (the cloud
+ * events/list + device cover_path are empty without cloud storage).
+ */
+async function warmLastEventImages() {
+  try {
+    const devs = await eufy.getDevices();
+    const accountId =
+      devs.find((d) => d.raw?.member?.admin_user_id)?.raw?.member?.admin_user_id ?? eufy.api?.auth?.userId ?? "";
+    // Sessions come up asynchronously after login — give them a moment to appear.
+    let sessions = eufy.getP2pSessions();
+    for (let i = 0; i < 20 && sessions.size === 0; i++) {
+      await sleep(1000);
+      sessions = eufy.getP2pSessions();
+    }
+    for (const [ssn, session] of sessions) {
+      for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500); // await handshake
+      if (!session.isConnected) continue;
+
+      let chunk = "";
+      const onChunk = ({ text }) => (chunk += text);
+      session.on("dbChunk", onChunk);
+      session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 });
+      setTimeout(() => session.isConnected && session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 }), 1500);
+      await sleep(6000);
+      session.off?.("dbChunk", onChunk);
+
+      const records = firstJsonObject(chunk)?.data ?? [];
+      const covers = new Map(); // device_sn -> on-HomeBase cover path
+      for (const rec of records) {
+        const p = rec?.payload?.crop_hb3_path;
+        if (rec?.device_sn && typeof p === "string" && p) covers.set(rec.device_sn, p);
+      }
+      if (!covers.size) continue;
+
+      const images = new Map(); // file -> jpeg buffer
+      const onImage = ({ file, data }) => {
+        if (data?.[0] === 0xff && data?.[1] === 0xd8) images.set(file, data);
+      };
+      session.on("image", onImage);
+      for (const [dsn, filePath] of covers) {
+        session.requestImage(filePath, { accountId });
+        for (let i = 0; i < 40 && !images.has(filePath); i++) await sleep(200); // ≤8s per image
+        const data = images.get(filePath);
+        if (data) {
+          fs.writeFileSync(path.join(eventImageDir, `last-event-${dsn}.jpg`), data);
+          console.log(`[bridge] warmed last-event image for ${dsn} (${data.length}B, local)`);
+        }
+      }
+      session.off?.("image", onImage);
+    }
+  } catch (e) {
+    console.error(`[bridge] warm last-event images failed: ${e?.message ?? e}`);
+  }
+}
+
 /** Runs once, after a successful login: wire events, write go2rtc.yaml, start go2rtc, go ready. */
 async function completeBoot() {
   if (ready || booting) return;
   booting = true;
   try {
-    for (const e of FORWARDED_EVENTS) eufy.on(e, (payload) => broadcast({ event: e, ...payload }));
+    eufy.on("deviceState", bumpActivity); // poll heartbeat — the watchdog's liveness signal
+    for (const e of FORWARDED_EVENTS)
+      eufy.on(e, (payload) => {
+        bumpActivity();
+        broadcast({ event: e, ...enrichPersonName(e, payload) });
+      });
     // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
     // gave a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to
     // "other"), so go2rtc registers exactly the cameras HA shows.
@@ -92,8 +336,16 @@ async function completeBoot() {
     const cams = await writeGo2rtcConfig(cfg, summaries);
     startGo2rtc();
     ready = true;
+    lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
+    watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
+    // Both read the P2P DB via a shared `dbChunk` stream — run sequentially so their accumulators
+    // don't cross-contaminate. Non-blocking so `ready` isn't held up.
+    void (async () => {
+      await warmFaceRoster(); // resolve person_id -> name for face-recognition events
+      await warmLastEventImages(); // populate "Last event" from local HomeBase storage on first load
+    })();
   } finally {
     booting = false;
   }
@@ -175,7 +427,17 @@ const httpServer = http.createServer(async (req, res) => {
   const [, kind, sn] = url.pathname.split("/");
 
   if (url.pathname === "/healthz") {
-    return json(res, 200, { ok: true, schemaVersion: SCHEMA_VERSION, auth: authStatus(), streaming: [...streaming] });
+    const idleSec = Math.round((Date.now() - lastActivity) / 1000);
+    return json(res, 200, {
+      ok: true,
+      schemaVersion: SCHEMA_VERSION,
+      auth: authStatus(),
+      streaming: [...streaming],
+      lastActivitySec: idleSec, // seconds since the last poll heartbeat / realtime event
+      stalled: ready && idleSec * 1000 >= stallThresholdMs(),
+      pushConnected, // FCM push channel — events (motion/doorbell/…) ride this
+      pushIdleSec: pushConnected ? 0 : Math.round((Date.now() - pushSince) / 1000),
+    });
   }
   if (!ready) return json(res, 503, { error: "not authenticated", auth: authStatus() });
 
@@ -198,20 +460,30 @@ const httpServer = http.createServer(async (req, res) => {
     }
   }
 
-  // The latest detection thumbnail the SDK downloaded + retained (no live capture). 404 until
-  // an event with a validated thumbnail has arrived over push.
+  // The latest detection thumbnail the SDK downloaded + retained (no live capture). The SDK's
+  // cache is in-memory (cleared on restart / watchdog recovery), so we also persist each served
+  // thumbnail to disk and fall back to it when nothing is retained — the "Last event" image then
+  // survives restarts instead of blanking until the next detection.
   if (kind === "event-image" && sn) {
+    const file = path.join(eventImageDir, `last-event-${sn}.jpg`);
     try {
       const cam = (await eufy.getDevice(sn)).camera?.();
       if (!cam?.snapshotStored) return json(res, 404, { error: "no camera on this device" });
       const jpeg = await cam.snapshotStored();
+      fs.writeFile(file, jpeg, () => {}); // best-effort persist for restart survival
       res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
       return res.end(jpeg);
     } catch (e) {
-      // StoredSnapshotUnavailableError (nothing retained yet) reads as a 404, not a 502.
-      // Surface its `reason` (not-observed / pending / download-failed / invalid-image) so a
-      // caller can tell "no event yet" from "the download/decrypt failed".
-      return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
+      // Nothing retained live — serve the last persisted thumbnail if we have one.
+      try {
+        const cached = await fs.promises.readFile(file);
+        res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
+        return res.end(cached);
+      } catch {
+        // No live and no persisted image. Surface the SDK reason (not-observed / pending /
+        // download-failed / invalid-image) so a caller can tell "no event yet" from a failure.
+        return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
+      }
     }
   }
 
@@ -309,6 +581,7 @@ async function handleMessage(ws, raw) {
         await eufy.reboot(msg.sn);
         return reply({});
       }
+
       case "config.get":
         // Current effective cloud poll interval (ms). 0 means polling is disabled.
         return reply({ pollMs: eufy.pollIntervalMs });
@@ -348,6 +621,7 @@ async function main() {
 }
 
 async function shutdown() {
+  if (watchdogTimer) clearInterval(watchdogTimer);
   go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
