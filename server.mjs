@@ -392,6 +392,7 @@ async function describeDevice(sn) {
     capabilities: m.capabilities,
     state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
     stream: isCamera ? `/stream/${m.sn}` : undefined,
+    streaming: isCamera ? streaming.has(m.sn) : undefined, // live P2P feed active right now?
     canReboot: m.codec === "station", // HomeBase-only; drives a Reboot button in HA
   };
 }
@@ -560,11 +561,17 @@ const httpServer = http.createServer(async (req, res) => {
       const cam = (await client.getDevice(sn)).camera?.();
       if (!cam?.openReadable) return json(res, 404, { error: "no live video on this device" });
       const feed = await cam.openReadable(); // node Readable of Annex-B
+      if (!streaming.has(sn)) broadcast({ event: "streamState", deviceSn: sn, active: true });
       streaming.add(sn);
       activeStreams.set(sn, { feed, startedAt: Date.now() });
       res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
       feed.pipe(res);
-      const cleanup = () => { feed.destroy(); streaming.delete(sn); activeStreams.delete(sn); };
+      // streaming.delete returns true only on the first cleanup for this feed → broadcast "off" once.
+      const cleanup = () => {
+        feed.destroy();
+        if (streaming.delete(sn)) broadcast({ event: "streamState", deviceSn: sn, active: false });
+        activeStreams.delete(sn);
+      };
       req.on("close", cleanup);
       feed.on("error", cleanup);
       feed.on("close", cleanup);
