@@ -33,6 +33,11 @@ const cfg = {
   // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). A frontend can also change
   // it live via the config.set WS command. 0 disables polling.
   pollMs: process.env.EUFY_POLL_MS ? Number(process.env.EUFY_POLL_MS) : undefined,
+  // Auto-off a live stream after this many ms with no detection event (motion/person/…). A battery
+  // camera bleeds power while its P2P live session is up, and go2rtc holds /stream open for as long as
+  // anything in HA consumes it — so keep the feed only while detections are recent. Default 5 min; 0
+  // disables (stream stays up as long as a consumer is attached).
+  streamIdleMs: process.env.STREAM_IDLE_MS != null ? Number(process.env.STREAM_IDLE_MS) : 300_000,
 };
 
 // Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
@@ -150,6 +155,7 @@ let booting = false;
 let lastActivity = Date.now();
 let recovering = false;
 let watchdogTimer = null;
+let streamIdleTimer = null;
 const bumpActivity = () => {
   lastActivity = Date.now();
 };
@@ -327,6 +333,7 @@ async function completeBoot() {
     for (const e of FORWARDED_EVENTS)
       eufy.on(e, (payload) => {
         bumpActivity();
+        if (DETECTION_EVENTS.has(e)) noteDetection(payload?.deviceSn);
         broadcast({ event: e, ...enrichPersonName(e, payload) });
       });
     // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice
@@ -338,6 +345,7 @@ async function completeBoot() {
     ready = true;
     lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
     watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
+    if (cfg.streamIdleMs) streamIdleTimer ??= setInterval(() => streamIdleTick(), 30_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
     // Both read the P2P DB via a shared `dbChunk` stream — run sequentially so their accumulators
@@ -422,6 +430,58 @@ async function deviceList() {
 // ── HTTP: video + snapshot + health ───────────────────────────────────────────────────────────────
 const streaming = new Set();
 
+// ── live-stream idle auto-off ────────────────────────────────────────────────────────────────────
+// Keep a camera's P2P live feed only while it's worth streaming. If no detection event arrives for
+// cfg.streamIdleMs, tear the feed down AND suspend reopening — go2rtc's ffmpeg source then retries into
+// a 503 (no P2P session opened). The suspension lifts on the next detection OR once the consumer stops
+// pulling (nobody watching), so a stuck 24/7 consumer keeps the radio off while a real viewer that comes
+// back later is served immediately. Detection events are the "something happened" pushes (not battery/
+// arming/state changes).
+const DETECTION_EVENTS = new Set([
+  "motion", "personDetected", "strangerDetected", "petDetection", "vehicleDetected", "dogDetected",
+  "doorbellPress", "packageDelivered", "packageTaken", "packageStranded", "soundDetected", "cryingDetected",
+]);
+const lastDetect = new Map();      // sn -> ms of the most recent detection
+const activeStreams = new Map();   // sn -> { feed, startedAt } for feeds currently piping
+const idleSuspended = new Set();   // sns torn down for idleness; reopen blocked (see below)
+const lastPullAttempt = new Map(); // sn -> ms go2rtc last asked for /stream (even while suspended)
+// While suspended, a stream reopens on the next detection OR once the consumer stops asking for this
+// long — i.e. go2rtc gave up because nobody in HA is watching, so a fresh open should just work again.
+const SUSPEND_RELEASE_MS = 30_000;
+
+/** Record a detection and lift any idle-suspension so the stream may reopen on the next go2rtc pull. */
+function noteDetection(sn) {
+  if (!sn) return;
+  lastDetect.set(sn, Date.now());
+  if (idleSuspended.delete(sn)) console.log(`[bridge] stream(${sn}) idle-suspension lifted by detection`);
+}
+
+/** Periodic sweep: auto-off any active feed whose last detection (or open, whichever is later) is stale. */
+function streamIdleTick() {
+  if (!cfg.streamIdleMs) return;
+  const now = Date.now();
+  // Auto-off any actively-pulled feed that has seen no detection for the whole idle window.
+  for (const [sn, st] of activeStreams) {
+    const lastSeen = Math.max(st.startedAt, lastDetect.get(sn) ?? 0);
+    if (now - lastSeen >= cfg.streamIdleMs) {
+      console.log(`[bridge] stream(${sn}) idle ${Math.round((now - lastSeen) / 1000)}s (no detection) — auto-off`);
+      idleSuspended.add(sn);
+      lastPullAttempt.set(sn, now); // it was being pulled right now; start the "consumer gave up" clock fresh
+      st.feed.destroy(); // fires the feed's cleanup, which drops it from activeStreams/streaming
+    }
+  }
+  // Lift a suspension once the consumer stops asking: go2rtc only pulls /stream while HA has a viewer,
+  // so no pull for SUSPEND_RELEASE_MS means nobody's watching — let the next genuine open succeed
+  // without waiting for motion. A stuck consumer (recording / always-on card) keeps pulling into the
+  // 503, so it stays suspended and the camera's radio stays off.
+  for (const sn of idleSuspended) {
+    if (now - (lastPullAttempt.get(sn) ?? 0) >= SUSPEND_RELEASE_MS) {
+      idleSuspended.delete(sn);
+      console.log(`[bridge] stream(${sn}) idle-suspension lifted — consumer stopped pulling`);
+    }
+  }
+}
+
 const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const [, kind, sn] = url.pathname.split("/");
@@ -433,6 +493,8 @@ const httpServer = http.createServer(async (req, res) => {
       schemaVersion: SCHEMA_VERSION,
       auth: authStatus(),
       streaming: [...streaming],
+      idleSuspended: [...idleSuspended], // cameras auto-off for no recent detection (awaiting next one)
+      streamIdleMs: cfg.streamIdleMs,    // 0 = idle auto-off disabled
       lastActivitySec: idleSec, // seconds since the last poll heartbeat / realtime event
       stalled: ready && idleSec * 1000 >= stallThresholdMs(),
       pushConnected, // FCM push channel — events (motion/doorbell/…) ride this
@@ -488,17 +550,24 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   if (kind === "stream" && sn) {
+    if (cfg.streamIdleMs) lastPullAttempt.set(sn, Date.now()); // consumer is asking (watched vs. gone)
+    // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's ffmpeg source
+    // retries into this until either a detection or the consumer giving up lifts it (see streamIdleTick).
+    if (cfg.streamIdleMs && idleSuspended.has(sn))
+      return json(res, 503, { error: "stream idle-suspended — no recent detection, waiting for motion or a fresh viewer" });
     try {
       const client = await streamClientFor(sn, cfg); // its OWN P2P session — see streams.mjs
       const cam = (await client.getDevice(sn)).camera?.();
       if (!cam?.openReadable) return json(res, 404, { error: "no live video on this device" });
       const feed = await cam.openReadable(); // node Readable of Annex-B
       streaming.add(sn);
+      activeStreams.set(sn, { feed, startedAt: Date.now() });
       res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
       feed.pipe(res);
-      const cleanup = () => { feed.destroy(); streaming.delete(sn); };
+      const cleanup = () => { feed.destroy(); streaming.delete(sn); activeStreams.delete(sn); };
       req.on("close", cleanup);
       feed.on("error", cleanup);
+      feed.on("close", cleanup);
       return;
     } catch (e) {
       return json(res, 502, { error: String(e?.message ?? e) });
@@ -622,6 +691,7 @@ async function main() {
 
 async function shutdown() {
   if (watchdogTimer) clearInterval(watchdogTimer);
+  if (streamIdleTimer) clearInterval(streamIdleTimer);
   go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
