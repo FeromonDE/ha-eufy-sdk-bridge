@@ -237,6 +237,15 @@ Full set: `motion`, `personDetected`, `strangerDetected`, `doorbellPress`, `petD
 `vehicleDetected`, `dogDetected`, `armingModeChanged`, `alarm`, `lockState`, `contactState`,
 `batteryLevel`, `batteryAlert`, `ptzNotify`, `smartLightState`.
 
+Plus a stream-lifecycle event (not a device push):
+
+```json
+{ "event": "streamState", "deviceSn": "EXAMPLE-CAM…", "active": true }
+```
+
+Fired when a camera's live P2P feed opens (`active: true`) or is torn down / idle-suspended
+(`active: false`). The device summary also carries the current value as a `streaming` boolean.
+
 ---
 
 ## Sibling HTTP endpoints
