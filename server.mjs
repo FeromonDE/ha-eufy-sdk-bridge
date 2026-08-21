@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
-import { EufyMega, FileSessionStore, LoginStatus } from "@mega-yfue/eufy-sdk";
+import { EufyMega, FileSessionStore, LoginStatus, ConsoleLogger } from "@mega-yfue/eufy-sdk";
 import { writeGo2rtcConfig } from "./go2rtc-config.mjs";
 import { streamClientFor, closeStreamClients } from "./streams.mjs";
 
@@ -112,6 +112,7 @@ const eufy = new EufyMega({
   countryCode: cfg.country,
   store: new FileSessionStore(cfg.session),
   pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
+  logger: DEBUG ? new ConsoleLogger() : undefined, // surfaces the SDK's own [p2p] SEND frame traces
 });
 eufy.on("error", (e) => {
   console.error(`[bridge] sdk error: ${e?.message ?? e}`);
