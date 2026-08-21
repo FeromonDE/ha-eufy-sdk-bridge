@@ -109,8 +109,9 @@ const eufy = new EufyMega({
 eufy.on("error", (e) => {
   console.error(`[bridge] sdk error: ${e?.message ?? e}`);
   // A kicked/invalid cloud token surfaces as SessionExpiredError (the SDK has already cleared the
-  // session). It rides the generic error bus, so match by name — the class is not exported. React
-  // immediately instead of waiting out the ~30-min poll-stall watchdog.
+  // session) on the generic error bus. Match by name rather than `instanceof` so it still fires under a
+  // dual-package install where host and SDK hold different class objects. React immediately instead of
+  // waiting out the ~30-min poll-stall watchdog.
   if (e?.name === "SessionExpiredError") maybeRecoverSession();
 });
 
