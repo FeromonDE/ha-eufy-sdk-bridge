@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
-import { EufyMega, FileSessionStore, LoginStatus } from "@mega-yfue/eufy-sdk";
+import { EufyMega, FileSessionStore, LoginStatus, ConsoleLogger } from "@mega-yfue/eufy-sdk";
 import { writeGo2rtcConfig } from "./go2rtc-config.mjs";
 import { streamClientFor, closeStreamClients } from "./streams.mjs";
 
@@ -46,6 +46,16 @@ const cfg = {
 };
 
 // Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
+// Opt-in verbose logging via the env file. BRIDGE_DEBUG=1 logs each incoming WS command (the HA poll,
+// device.set, …) + control-command timing + P2P transport lifecycle — enough to see the frontend↔SDK
+// flow without editing code. Off by default. The noisy per-frame P2P firehose is a separate opt-in,
+// BRIDGE_DEBUG_P2P=1 (routes the SDK's ConsoleLogger through).
+const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
+const DEBUG = truthy(process.env.BRIDGE_DEBUG);
+const DEBUG_P2P = truthy(process.env.BRIDGE_DEBUG_P2P);
+const dbg = (...a) => { if (DEBUG) console.log("[bridge:dbg]", ...a); };
+if (DEBUG) console.log(`[bridge] BRIDGE_DEBUG on — verbose logging (p2p-firehose ${DEBUG_P2P ? "on" : "off"})`);
+
 const eventImageDir = path.dirname(cfg.session);
 fs.mkdirSync(eventImageDir, { recursive: true });
 
@@ -110,6 +120,7 @@ const eufy = new EufyMega({
   countryCode: cfg.country,
   store: new FileSessionStore(cfg.session),
   pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
+  logger: DEBUG_P2P ? new ConsoleLogger("info") : undefined, // BRIDGE_DEBUG_P2P → raw SDK transport logs
 });
 eufy.on("error", (e) => {
   console.error(`[bridge] sdk error: ${e?.message ?? e}`);
@@ -393,6 +404,11 @@ async function completeBoot() {
   booting = true;
   try {
     eufy.on("deviceState", bumpActivity); // poll heartbeat — the watchdog's liveness signal
+    if (DEBUG) {
+      eufy.on("p2pConnect", (sn) => dbg(`p2pConnect station=${sn}`));
+      eufy.on("p2pClose", (sn) => dbg(`p2pClose station=${sn}`));
+      eufy.on("commandAck", (info) => dbg(`commandAck ${JSON.stringify(info)}`));
+    }
     for (const e of FORWARDED_EVENTS)
       eufy.on(e, (payload) => {
         bumpActivity();
@@ -704,6 +720,13 @@ async function handleMessage(ws, raw) {
   let msg;
   try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { ok: false, error: "bad json" }); }
   const { id, cmd } = msg;
+  if (DEBUG) {
+    const bits = [`cmd=${cmd}`];
+    if (msg.sn != null) bits.push(`sn=${msg.sn}`);
+    if (msg.name != null) bits.push(`name=${msg.name}`);
+    if (msg.value !== undefined) bits.push(`value=${JSON.stringify(msg.value)}`);
+    dbg("ws recv", bits.join(" ")); // NB: 2FA code / captcha (msg.code/msg.captcha) never logged
+  }
   const reply = (extra) => send(ws, { id, ok: true, ...extra });
   const fail = (error) => send(ws, { id, ok: false, error: String(error?.message ?? error) });
   try {
@@ -746,7 +769,15 @@ async function handleMessage(ws, raw) {
         return reply({ sn: msg.sn, properties: propertySpecs(dev) });
       }
       case "device.set": {
-        await eufy.setProperty(msg.sn, msg.name, msg.value);
+        const t0 = Date.now();
+        dbg(`device.set → setProperty sn=${msg.sn} name=${msg.name} value=${JSON.stringify(msg.value)}`);
+        try {
+          await eufy.setProperty(msg.sn, msg.name, msg.value);
+          dbg(`device.set OK sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms)`);
+        } catch (e) {
+          console.error(`[bridge] device.set FAILED sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+          throw e; // outer catch surfaces it to the frontend (+ triggers session recovery if kicked)
+        }
         return reply({});
       }
       case "device.reboot": {
