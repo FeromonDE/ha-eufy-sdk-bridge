@@ -38,6 +38,11 @@ const cfg = {
   // anything in HA consumes it — so keep the feed only while detections are recent. Default 5 min; 0
   // disables (stream stays up as long as a consumer is attached).
   streamIdleMs: process.env.STREAM_IDLE_MS != null ? Number(process.env.STREAM_IDLE_MS) : 300_000,
+  // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
+  // continuously and drains — even when nobody consumes it (the bridge's own live path is separate P2P,
+  // not this flag). If a battery device has rtspStream=true but has been idle (no detection, no active
+  // bridge stream) this long, the bridge turns rtspStream OFF on the device. Default 5 min; 0 disables.
+  rtspIdleOffMs: process.env.RTSP_IDLE_OFF_MS != null ? Number(process.env.RTSP_IDLE_OFF_MS) : 300_000,
 };
 
 // Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
@@ -213,6 +218,7 @@ let lastActivity = Date.now();
 let recovering = false;
 let watchdogTimer = null;
 let streamIdleTimer = null;
+let rtspIdleTimer = null;
 const bumpActivity = () => {
   lastActivity = Date.now();
 };
@@ -403,6 +409,7 @@ async function completeBoot() {
     lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
     watchdogTimer ??= setInterval(() => void watchdogTick(), 2 * 60_000);
     if (cfg.streamIdleMs) streamIdleTimer ??= setInterval(() => streamIdleTick(), 30_000);
+    if (cfg.rtspIdleOffMs) rtspIdleTimer ??= setInterval(() => void rtspIdleSweep(), 60_000);
     console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
     broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
     // Both read the P2P DB via a shared `dbChunk` stream — run sequentially so their accumulators
@@ -503,6 +510,7 @@ const lastDetect = new Map();      // sn -> ms of the most recent detection
 const activeStreams = new Map();   // sn -> { feed, startedAt } for feeds currently piping
 const idleSuspended = new Set();   // sns torn down for idleness; reopen blocked (see below)
 const lastPullAttempt = new Map(); // sn -> ms go2rtc last asked for /stream (even while suspended)
+const rtspLastActive = new Map();  // sn -> ms of last detection/stream, for the battery rtspStream auto-off
 // While suspended, a stream reopens on the next detection OR once the consumer stops asking for this
 // long — i.e. go2rtc gave up because nobody in HA is watching, so a fresh open should just work again.
 const SUSPEND_RELEASE_MS = 30_000;
@@ -510,8 +518,38 @@ const SUSPEND_RELEASE_MS = 30_000;
 /** Record a detection and lift any idle-suspension so the stream may reopen on the next go2rtc pull. */
 function noteDetection(sn) {
   if (!sn) return;
-  lastDetect.set(sn, Date.now());
+  const now = Date.now();
+  lastDetect.set(sn, now);
+  rtspLastActive.set(sn, now); // a detection counts as activity for the battery rtspStream auto-off
   if (idleSuspended.delete(sn)) console.log(`[bridge] stream(${sn}) idle-suspension lifted by detection`);
+}
+
+/**
+ * Battery-saver sweep: turn the device's native `rtspStream` publish OFF on a BATTERY camera that has
+ * been idle (no detection, no active bridge stream) for cfg.rtspIdleOffMs — a forgotten rtspStream=ON
+ * on a battery cam publishes continuously and flattens it. Uses the cached device state (no cloud call).
+ */
+async function rtspIdleSweep() {
+  if (!cfg.rtspIdleOffMs || !ready || recovering) return;
+  const now = Date.now();
+  let devices;
+  try { devices = await deviceList(); } catch { return; }
+  for (const d of devices) {
+    const sn = d.sn;
+    if (!(d.capabilities ?? []).includes("battery")) continue; // battery cameras only
+    if (d.state?.rtspStream !== true) continue;                 // only if currently publishing
+    if (activeStreams.has(sn)) { rtspLastActive.set(sn, now); continue; } // being streamed = active
+    const lastSeen = rtspLastActive.get(sn);
+    if (lastSeen === undefined) { rtspLastActive.set(sn, now); continue; } // give a full window from first sight
+    if (now - lastSeen < cfg.rtspIdleOffMs) continue;
+    console.log(`[bridge] ${sn} battery + rtspStream idle ${Math.round((now - lastSeen) / 1000)}s — turning rtspStream OFF (battery-save)`);
+    try {
+      await eufy.setProperty(sn, "rtspStream", false);
+      rtspLastActive.set(sn, now); // reset so we don't re-fire before the state refreshes
+    } catch (e) {
+      console.error(`[bridge] ${sn} rtspStream auto-off failed: ${e?.message ?? e}`);
+    }
+  }
 }
 
 /** Periodic sweep: auto-off any active feed whose last detection (or open, whichever is later) is stale. */
@@ -622,6 +660,7 @@ const httpServer = http.createServer(async (req, res) => {
       if (!streaming.has(sn)) broadcast({ event: "streamState", deviceSn: sn, active: true });
       streaming.add(sn);
       activeStreams.set(sn, { feed, startedAt: Date.now() });
+      rtspLastActive.set(sn, Date.now()); // a live stream counts as activity for the rtspStream auto-off
       res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
       feed.pipe(res);
       // streaming.delete returns true only on the first cleanup for this feed → broadcast "off" once.
@@ -757,6 +796,7 @@ async function main() {
 async function shutdown() {
   if (watchdogTimer) clearInterval(watchdogTimer);
   if (streamIdleTimer) clearInterval(streamIdleTimer);
+  if (rtspIdleTimer) clearInterval(rtspIdleTimer);
   go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
