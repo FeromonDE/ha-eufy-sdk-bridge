@@ -106,7 +106,13 @@ const eufy = new EufyMega({
   store: new FileSessionStore(cfg.session),
   pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
 });
-eufy.on("error", (e) => console.error(`[bridge] sdk error: ${e?.message ?? e}`));
+eufy.on("error", (e) => {
+  console.error(`[bridge] sdk error: ${e?.message ?? e}`);
+  // A kicked/invalid cloud token surfaces as SessionExpiredError (the SDK has already cleared the
+  // session). It rides the generic error bus, so match by name — the class is not exported. React
+  // immediately instead of waiting out the ~30-min poll-stall watchdog.
+  if (e?.name === "SessionExpiredError") maybeRecoverSession();
+});
 
 // Push (FCM) liveness — the watchdog's poll heartbeat can't see a dead push channel (events ride
 // push, state rides poll), so track push connect/disconnect explicitly.
@@ -123,10 +129,22 @@ eufy.on("pushDisconnect", () => {
 
 // ── auth state (driven over WS) ──────────────────────────────────────────────────────────────────
 let ready = false; // logged in + booted
+let sessionLost = false; // cloud token kicked/expired after boot → re-auth needed (ready stays true so
+                         // completeBoot's one-time wiring is not re-run; authStatus reflects the loss)
 let lastLogin; // the most recent LoginResult (undefined until first attempt)
 
 /** The normalized auth state a frontend reads — one shape for `auth.status`, the `auth` event and /healthz. */
 function authStatus() {
+  // A post-boot session loss outranks `ready`: surface the re-auth need so HA stops trusting stale state.
+  if (sessionLost) {
+    if (lastLogin?.status === LoginStatus.Captcha) {
+      return { state: "require_captcha", image: lastLogin.image, retry: lastLogin.retry };
+    }
+    if (lastLogin?.status === LoginStatus.TwoFactor) {
+      return { state: "require_2fa", method: lastLogin.method };
+    }
+    return { state: "reauth" }; // kicked; automatic re-login in progress or just failed
+  }
   if (ready) return { state: "ok" };
   if (lastLogin?.status === LoginStatus.Captcha) {
     return { state: "require_captcha", image: lastLogin.image, retry: lastLogin.retry };
@@ -140,8 +158,46 @@ function authStatus() {
 /** Apply a LoginResult: complete the boot on success, and always tell every client the new auth state. */
 async function applyLogin(result) {
   lastLogin = result;
-  if (result.status === LoginStatus.Ok) await completeBoot();
+  if (result.status === LoginStatus.Ok) {
+    await completeBoot(); // no-op once `ready` (first boot only), so re-auth never re-wires listeners
+    if (sessionLost) {
+      // Recovered from a post-boot expiry: clear the flag and re-arm the poll under the fresh epoch.
+      sessionLost = false;
+      eufy.setPollInterval(eufy.pollIntervalMs);
+      lastActivity = Date.now();
+      pushSince = Date.now();
+    }
+  }
   broadcast({ event: "auth", ...authStatus() });
+}
+
+/** Guarded entry: kick off a single re-auth after a post-boot session loss. */
+function maybeRecoverSession() {
+  if (ready && !sessionLost && !recovering) void onSessionExpired();
+}
+
+/**
+ * The cloud token was kicked/invalidated after boot. Surface the loss to HA at once (so it stops
+ * trusting stale poll data), then try to re-login in place. A fresh login usually needs 2FA — that is
+ * broadcast as `require_2fa`, so HA can drive the re-auth immediately rather than after the 30-min
+ * poll-stall watchdog exits the process.
+ */
+async function onSessionExpired() {
+  sessionLost = true;
+  recovering = true; // also blocks the poll-stall watchdog from racing this
+  broadcast({ event: "auth", ...authStatus() });
+  console.error("[bridge] cloud session expired (kicked/invalid) — re-authenticating");
+  try {
+    await eufy.disconnect().catch(() => {});
+    await applyLogin(await eufy.login()); // Ok → clears sessionLost + re-arms; else → surfaces require_2fa
+    if (sessionLost) console.error(`[bridge] re-login needs user action (${lastLogin?.status}) — drive auth.submit`);
+    else console.log("[bridge] cloud session re-established after expiry");
+  } catch (err) {
+    broadcast({ event: "auth", ...authStatus() });
+    console.error(`[bridge] session recovery failed: ${err?.message ?? err}`);
+  } finally {
+    recovering = false;
+  }
 }
 
 let booting = false;
@@ -493,6 +549,7 @@ const httpServer = http.createServer(async (req, res) => {
       ok: true,
       schemaVersion: SCHEMA_VERSION,
       auth: authStatus(),
+      sessionLost, // cloud token kicked/expired since boot → re-auth in progress/needed
       streaming: [...streaming],
       idleSuspended: [...idleSuspended], // cameras auto-off for no recent detection (awaiting next one)
       streamIdleMs: cfg.streamIdleMs,    // 0 = idle auto-off disabled
@@ -677,7 +734,7 @@ async function handleMessage(ws, raw) {
         });
       case "stream.stop": return reply({}); // advisory; the media connection is the real signal
     }
-  } catch (e) { return fail(e); }
+  } catch (e) { if (e?.name === "SessionExpiredError") maybeRecoverSession(); return fail(e); }
 }
 
 function send(ws, obj) { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); }
