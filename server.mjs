@@ -40,6 +40,13 @@ const cfg = {
   streamIdleMs: process.env.STREAM_IDLE_MS != null ? Number(process.env.STREAM_IDLE_MS) : 300_000,
 };
 
+// Debug tracing (set BRIDGE_DEBUG=1) — verbose control-command + transport logging to diagnose why a
+// toggle does/doesn\'t reach the device: is the frontend sending it, and does the SDK wake P2P/MQTT
+// and get an ack? Off by default; harmless when off.
+const DEBUG = /^(1|true|yes|on)$/i.test(String(process.env.BRIDGE_DEBUG ?? ""));
+const dbg = (...a) => { if (DEBUG) console.log("[bridge:dbg]", ...a); };
+if (DEBUG) console.log("[bridge] BRIDGE_DEBUG on — verbose control/transport tracing enabled");
+
 // Where persisted last-event thumbnails live — the same (mounted) data dir as the session file.
 const eventImageDir = path.dirname(cfg.session);
 fs.mkdirSync(eventImageDir, { recursive: true });
@@ -387,6 +394,13 @@ async function completeBoot() {
   booting = true;
   try {
     eufy.on("deviceState", bumpActivity); // poll heartbeat — the watchdog's liveness signal
+    if (DEBUG) {
+      // These answer "did the SDK wake P2P and get the command through?" for a toggle.
+      eufy.on("p2pConnect", (sn) => dbg(`p2pConnect station=${sn}`));
+      eufy.on("p2pClose", (sn) => dbg(`p2pClose station=${sn}`));
+      eufy.on("p2pLevel2Ready", (info) => dbg(`p2pLevel2Ready ${JSON.stringify(info)}`));
+      eufy.on("commandAck", (info) => dbg(`commandAck ${JSON.stringify(info)}`));
+    }
     for (const e of FORWARDED_EVENTS)
       eufy.on(e, (payload) => {
         bumpActivity();
@@ -665,6 +679,13 @@ async function handleMessage(ws, raw) {
   let msg;
   try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { ok: false, error: "bad json" }); }
   const { id, cmd } = msg;
+  if (DEBUG) {
+    const bits = [`cmd=${cmd}`];
+    if (msg.sn != null) bits.push(`sn=${msg.sn}`);
+    if (msg.name != null) bits.push(`name=${msg.name}`);
+    if (msg.value !== undefined) bits.push(`value=${JSON.stringify(msg.value)}`);
+    dbg("ws recv", bits.join(" ")); // NOTE: 2FA code / captcha (msg.code/msg.captcha) deliberately not logged
+  }
   const reply = (extra) => send(ws, { id, ok: true, ...extra });
   const fail = (error) => send(ws, { id, ok: false, error: String(error?.message ?? error) });
   try {
@@ -707,7 +728,16 @@ async function handleMessage(ws, raw) {
         return reply({ sn: msg.sn, properties: propertySpecs(dev) });
       }
       case "device.set": {
-        await eufy.setProperty(msg.sn, msg.name, msg.value);
+        const t0 = Date.now();
+        dbg(`device.set → setProperty sn=${msg.sn} name=${msg.name} value=${JSON.stringify(msg.value)}`);
+        try {
+          await eufy.setProperty(msg.sn, msg.name, msg.value);
+          dbg(`device.set OK sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms) — resolved (dispatch fired; not a device-convergence guarantee)`);
+        } catch (e) {
+          console.error(`[bridge] device.set FAILED sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+          if (DEBUG && e?.stack) console.error(e.stack);
+          throw e; // outer catch surfaces it to the frontend (and triggers session recovery if kicked)
+        }
         return reply({});
       }
       case "device.reboot": {

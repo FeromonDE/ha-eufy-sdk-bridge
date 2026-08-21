@@ -48,7 +48,9 @@ COPY bin ./bin
 RUN chmod +x bin/start.sh && ln -sf /app/bin/start.sh /usr/local/bin/eufy-sdk-bridge
 
 ENV BRIDGE_APP_DIR=/app BRIDGE_PORT=3000 BRIDGE_HOST=0.0.0.0 \
-    GO2RTC_CONFIG=/app/data/go2rtc.yaml EUFY_SESSION=/app/data/.eufy-session.json
+    GO2RTC_CONFIG=/app/data/go2rtc.yaml EUFY_SESSION=/app/data/.eufy-session.json \
+    BRIDGE_DEBUG=1
+# ^ DEBUG build: verbose control/transport tracing ON by default. Override with BRIDGE_DEBUG=0.
 RUN mkdir -p /app/data
 EXPOSE 3000 1984 8554 8555/udp
 
