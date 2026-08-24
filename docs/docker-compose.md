@@ -4,7 +4,7 @@ The bridge is one container that logs into eufy **once** and exposes the SDK ove
 video) for the [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk) Home Assistant integration.
 The published image already bundles the SDK and go2rtc, so you don't build anything — you pull and run.
 
-- **Image:** `<your-image>` (`linux/amd64`)
+- **Image:** `ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest` (multi-arch: `amd64` · `arm64` · `arm/v7`)
 - **Ports:** `3000` WS/HTTP control · `1984` go2rtc API/WebRTC · `8554` RTSP · `8555` WebRTC (TCP/UDP)
 
 > **One session per account.** eufy allows a single active login per account, so run **exactly one**
@@ -22,7 +22,7 @@ services:
   # ... your existing homeassistant service ...
 
   eufy-bridge:
-    image: <your-image>
+    image: ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest
     container_name: eufy-bridge
     restart: unless-stopped
     network_mode: host          # needed for go2rtc WebRTC (UDP/ICE)
@@ -55,7 +55,7 @@ server's LAN IP) and the port you set.
 ```yaml
 services:
   eufy-bridge:
-    image: <your-image>
+    image: ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest
     container_name: eufy-bridge
     restart: unless-stopped
     network_mode: host
@@ -130,8 +130,9 @@ See [`ws-protocol.md`](./ws-protocol.md) for the full WebSocket protocol.
 
 ## Notes
 
-- **Architecture:** the published image is `linux/amd64`. On arm64 (Raspberry Pi / HA OS on ARM) it
-  won't run yet — a multi-arch build is on the roadmap.
+- **Architecture:** the published `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` image is a multi-arch manifest
+  (`linux/amd64`, `linux/arm64`, `linux/arm/v7`), so it runs on Raspberry Pi / HA OS on ARM as well as
+  x86. Republish it with `scripts/publish-multiarch.sh` (see the repo README's deploy note).
 - **Not host networking?** WebRTC needs UDP/ICE, which is awkward behind bridge networking. If you drop
   `network_mode: host`, publish the ports (`3000`, `1984`, `8554`, `8555/udp`) and expect to sort out
   WebRTC separately; control + snapshots + RTSP still work.
