@@ -24,7 +24,7 @@ Pull the published image and run it (bundles the SDK + go2rtc):
 docker run -d --name eufy-bridge --network host \
   -e EUFY_EMAIL='you@example.com' -e EUFY_PASSWORD='…' -e EUFY_COUNTRY='GB' \
   -v /opt/eufy-bridge-data:/app/data \
-  <your-image>
+  ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest
 ```
 
 or with Compose (`cp .env.example .env` first): `docker compose up -d`.
@@ -42,4 +42,6 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 | [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk) | the HACS integration (front door) |
 
 > Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
-> streaming. Published image: `<your-image>` (amd64; multi-arch on the roadmap).
+> streaming. Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64` ·
+> `arm/v7`). Maintainers republish it with [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh)
+> — `buildx` builds all three arches from one manifest and pushes to ghcr.
