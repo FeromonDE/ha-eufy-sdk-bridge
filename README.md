@@ -43,5 +43,6 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 
 > Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
 > streaming. Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64` ·
-> `arm/v7`). Maintainers republish it with [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh)
-> — `buildx` builds all three arches from one manifest and pushes to ghcr.
+> `arm/v7`). **Publishing a GitHub Release** builds and pushes the versioned + `:latest` tags
+> automatically ([`.github/workflows/publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml)); the same
+> build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh).
