@@ -51,6 +51,12 @@ Ask what the login needs right now.
 | `require_2fa` | `method` | a 2FA code was sent; submit it |
 | `require_captcha` | `image` (`data:image/png;base64,…`), `retry` (bool) | solve the captcha image |
 | `pending` | — | no challenge yet / retrying |
+| `reauth` | — | the cloud session was kicked/expired **after** startup (another login on the account, or a token timeout); the bridge is re-logging in automatically. It becomes `ok` on success, or `require_2fa` if a fresh code is needed — drive `auth.submit` then |
+
+The bridge pushes an unsolicited `auth` event (same fields as `auth.status`'s `auth` object) whenever this
+state changes, so a frontend re-renders the challenge without polling. A single active session per account
+means a login elsewhere (e.g. opening the phone app) bumps the bridge into `reauth`; it recovers on its own
+unless the account then demands a 2FA code.
 
 ### `auth.submit`
 Submit a 2FA code **or** a captcha answer. The pending id/token is held inside the bridge.
@@ -108,6 +114,9 @@ Every device the account exposes. *(Requires `auth.state == "ok"`.)*
 - `model` is the T-code (e.g. `T8410`); `modelName` is the product display name (e.g. `Indoor Cam Pan & Tilt`).
 - `state` is a flat `{ property: value }` map of the device's **current** values; reading it schedules a background refresh, and semantic events (below) push changes between reads.
 - `stream` is present only on devices with live video (cameras/doorbells).
+- `streaming` (cameras/doorbells only) is `true` while a live P2P feed is actually open right now — the
+  same signal the `streamState` event carries, so a frontend can seed a "Streaming" sensor from the list.
+- `canReboot` is `true` on HomeBase/station devices, which accept `device.reboot`.
 - A device that failed to resolve appears as `{ "sn": "…", "error": "…" }`.
 
 ### `device.state`
@@ -156,6 +165,20 @@ device's capabilities expose (e.g. `statusLed`, `nightVision`, guard-mode `mode`
 { "id": 6, "ok": true }
 // unsupported property / device →
 { "id": 6, "ok": false, "error": "device … does not support 'statusLed'" }
+```
+
+### `device.reboot`
+Reboot a **HomeBase / station** (maps to the SDK's `reboot`). Only devices with `canReboot: true` accept
+it; the SDK throws for a non-hub serial. The hub drops offline for a minute or two, then rejoins.
+*(Requires auth.)*
+
+```jsonc
+// →
+{ "id": 7, "cmd": "device.reboot", "sn": "EXAMPLE-STATION-0003" }
+// ←
+{ "id": 7, "ok": true }
+// non-hub serial →
+{ "id": 7, "ok": false, "error": "…" }
 ```
 
 ### `config.get` / `config.set`
