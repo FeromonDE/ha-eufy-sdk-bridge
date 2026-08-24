@@ -1,0 +1,73 @@
+// Environment → the immutable config + constants the whole bridge reads. Side-effect free (no mkdir,
+// no process.exit) so it can be imported from tests; server.mjs owns the startup guards.
+import path from "node:path";
+
+export const SCHEMA_VERSION = 1; // bump on any breaking protocol change so an old frontend fails loudly
+
+const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
+
+/** The SDK event names broadcast to every connected WS client. */
+export const FORWARDED_EVENTS = [
+  "motion", "personDetected", "strangerDetected", "doorbellPress", "petDetection",
+  "packageDelivered", "packageTaken", "packageStranded", "soundDetected", "cryingDetected",
+  "vehicleDetected", "dogDetected", "armingModeChanged", "alarm", "lockState",
+  "contactState", "batteryLevel", "batteryAlert", "ptzNotify", "smartLightState",
+];
+
+// The "something happened" pushes (not battery/arming/state changes) — these keep a camera's live
+// feed warm and reset the battery rtspStream idle clock (see stream-idle.mjs).
+export const DETECTION_EVENTS = new Set([
+  "motion", "personDetected", "strangerDetected", "petDetection", "vehicleDetected", "dogDetected",
+  "doorbellPress", "packageDelivered", "packageTaken", "packageStranded", "soundDetected", "cryingDetected",
+]);
+
+export const PUSH_STALL_MS = 5 * 60_000;   // push down (or never up) this long ⇒ events are dead ⇒ recover
+export const SUSPEND_RELEASE_MS = 30_000;  // no /stream pull this long while suspended ⇒ nobody's watching
+
+/**
+ * Parse the environment into the config + derived constants. `dbg` is a no-op unless BRIDGE_DEBUG is on.
+ * BRIDGE_DEBUG=1 logs each WS command + control timing + P2P lifecycle; BRIDGE_DEBUG_P2P=1 additionally
+ * routes the SDK's raw per-frame ConsoleLogger (very noisy).
+ */
+export function loadConfig(env = process.env) {
+  const cfg = {
+    email: env.EUFY_EMAIL,
+    password: env.EUFY_PASSWORD,
+    country: env.EUFY_COUNTRY || "GB",
+    host: env.BRIDGE_HOST || "0.0.0.0",
+    port: Number(env.BRIDGE_PORT || 3000),
+    session: env.EUFY_SESSION || "./data/.eufy-session.json",
+    go2rtcConfig: env.GO2RTC_CONFIG || "./go2rtc.yaml",
+    selfHost: env.BRIDGE_SELF_HOST || "127.0.0.1",
+    // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). Changeable live via the
+    // config.set WS command. 0 disables polling.
+    pollMs: env.EUFY_POLL_MS ? Number(env.EUFY_POLL_MS) : undefined,
+    // Auto-off a live stream after this many ms with no detection event. A battery camera bleeds power
+    // while its P2P live session is up, and go2rtc holds /stream open as long as anything consumes it —
+    // so keep the feed only while detections are recent. Default 5 min; 0 disables.
+    streamIdleMs: env.STREAM_IDLE_MS != null ? Number(env.STREAM_IDLE_MS) : 300_000,
+    // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
+    // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
+    // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
+    rtspIdleOffMs: env.RTSP_IDLE_OFF_MS != null ? Number(env.RTSP_IDLE_OFF_MS) : 300_000,
+  };
+
+  const DEBUG = truthy(env.BRIDGE_DEBUG);
+  const DEBUG_P2P = truthy(env.BRIDGE_DEBUG_P2P);
+  const dbg = (...a) => {
+    if (DEBUG) console.log("[bridge:dbg]", ...a);
+  };
+
+  return {
+    cfg,
+    SCHEMA_VERSION,
+    DEBUG,
+    DEBUG_P2P,
+    dbg,
+    eventImageDir: path.dirname(cfg.session), // last-event thumbnails live beside the session file
+    FORWARDED_EVENTS,
+    DETECTION_EVENTS,
+    PUSH_STALL_MS,
+    SUSPEND_RELEASE_MS,
+  };
+}

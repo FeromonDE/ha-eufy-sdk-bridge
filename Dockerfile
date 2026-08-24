@@ -44,6 +44,7 @@ RUN npm pkg set "dependencies.@mega-yfue/eufy-sdk=file:$(ls /tmp/*.tgz)" \
  && rm -f /tmp/*.tgz
 
 COPY server.mjs streams.mjs go2rtc-config.mjs ./
+COPY src ./src
 COPY bin ./bin
 RUN chmod +x bin/start.sh && ln -sf /app/bin/start.sh /usr/local/bin/eufy-sdk-bridge
 
