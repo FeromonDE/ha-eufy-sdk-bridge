@@ -50,6 +50,11 @@ export function loadConfig(env = process.env) {
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
     rtspIdleOffMs: env.RTSP_IDLE_OFF_MS != null ? Number(env.RTSP_IDLE_OFF_MS) : 300_000,
+    // Event pre-warm: the SDK can speculatively open a camera's P2P session on a high-intent event
+    // (doorbell/person/pet/package) so a following live view starts instantly. OFF by default here — it
+    // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to enable the SDK's
+    // default pre-warm events.
+    prewarm: truthy(env.BRIDGE_PREWARM),
   };
 
   const DEBUG = truthy(env.BRIDGE_DEBUG);

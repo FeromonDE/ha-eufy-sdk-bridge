@@ -11,6 +11,10 @@ export function createEufy({ cfg, DEBUG_P2P }) {
     countryCode: cfg.country,
     store: new FileSessionStore(cfg.session),
     pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
+    // Event pre-warm is OFF by default (`[]` = no event opens P2P speculatively) so a battery camera's
+    // radio isn't held open ~28s per doorbell/person/pet/package event. BRIDGE_PREWARM=1 → undefined,
+    // which lets the SDK use its default high-intent pre-warm events.
+    prewarmEvents: cfg.prewarm ? undefined : [],
     logger: DEBUG_P2P ? new ConsoleLogger("info") : undefined,
   });
 }
