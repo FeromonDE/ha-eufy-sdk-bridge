@@ -100,6 +100,7 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `BRIDGE_DEBUG` | off | `1` logs each incoming WS command, control-command timing, and P2P connect/close/ack — enough to trace the frontend↔SDK flow |
 | `BRIDGE_DEBUG_P2P` | off | `1` additionally routes the SDK's raw per-frame transport logs (very noisy) |
 | `BRIDGE_SELF_HOST` | `127.0.0.1` | host go2rtc uses to pull `/stream/<sn>` back from the bridge |
+| `BRIDGE_PREWARM` | off | `1` = speculatively open a camera's P2P session on a high-intent event (doorbell/person/pet/package) so a following live view starts instantly. Off by default — it holds a battery camera's radio open ~28s per event |
 
 ---
 
