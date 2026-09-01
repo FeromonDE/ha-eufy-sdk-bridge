@@ -63,12 +63,23 @@ export function loadConfig(env = process.env) {
     if (DEBUG) console.log("[bridge:dbg]", ...a);
   };
 
+  // Event log — a NARROW, always-on-by-default trace of just the realtime-event path: a push/semantic
+  // event arriving, how many frontend (WS) clients it was broadcast to, and each "Last event" image
+  // fetch. This is NOT the BRIDGE_DEBUG firehose — it fires only on real events, so it's quiet on an idle
+  // system and is what a "why isn't Last event updating" report needs. Set BRIDGE_EVENT_LOG=0 to silence.
+  const EVENT_LOG = env.BRIDGE_EVENT_LOG == null ? true : truthy(env.BRIDGE_EVENT_LOG);
+  const eventLog = (...a) => {
+    if (EVENT_LOG) console.log("[bridge:event]", ...a);
+  };
+
   return {
     cfg,
     SCHEMA_VERSION,
     DEBUG,
     DEBUG_P2P,
     dbg,
+    EVENT_LOG,
+    eventLog,
     eventImageDir: path.dirname(cfg.session), // last-event thumbnails live beside the session file
     FORWARDED_EVENTS,
     DETECTION_EVENTS,
