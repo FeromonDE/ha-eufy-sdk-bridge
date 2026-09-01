@@ -99,6 +99,7 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `RTSP_IDLE_OFF_MS` | `300000` (5 min) | battery-saver: turn a **battery** camera's native `rtspStream` publish OFF after this long idle (no detection, no active bridge stream), so a forgotten `rtspStream=ON` can't drain it. Wired cameras are never touched. `0` disables |
 | `BRIDGE_DEBUG` | off | `1` logs each incoming WS command, control-command timing, and P2P connect/close/ack — enough to trace the frontend↔SDK flow |
 | `BRIDGE_DEBUG_P2P` | off | `1` additionally routes the SDK's raw per-frame transport logs (very noisy) |
+| `BRIDGE_EVENT_LOG` | **on** | prints a `[bridge:event]` line per push/semantic event: what it is, how many frontend clients it reached, and each "Last event" image fetch + result. Narrow (only real events), not the `BRIDGE_DEBUG` firehose. `0` silences |
 | `BRIDGE_SELF_HOST` | `127.0.0.1` | host go2rtc uses to pull `/stream/<sn>` back from the bridge |
 | `BRIDGE_PREWARM` | off | `1` = speculatively open a camera's P2P session on a high-intent event (doorbell/person/pet/package) so a following live view starts instantly. Off by default — it holds a battery camera's radio open ~28s per event |
 

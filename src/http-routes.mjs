@@ -62,23 +62,31 @@ export function createHttpHandler(ctx) {
     // in-memory (cleared on restart / watchdog recovery), so we also persist each served thumbnail to disk
     // and fall back to it when nothing is retained — the "Last event" image then survives restarts.
     if (kind === "event-image" && sn) {
+      // HA fetches this to render "Last event" (usually right after a detection event). Trace the
+      // outcome so a "Last event never updates" report shows whether HA even asked and what it got back.
       const file = path.join(eventImageDir, `last-event-${sn}.jpg`);
       try {
         const cam = (await eufy.getDevice(sn)).camera?.();
-        if (!cam?.snapshotStored) return json(res, 404, { error: "no camera on this device" });
+        if (!cam?.snapshotStored) {
+          ctx.eventLog(`/event-image ${sn} → 404 no camera on device`);
+          return json(res, 404, { error: "no camera on this device" });
+        }
         const jpeg = await cam.snapshotStored();
         fs.writeFile(file, jpeg, () => {}); // best-effort persist for restart survival
+        ctx.eventLog(`/event-image ${sn} → 200 live thumbnail (${jpeg.length}B) — Last event updated`);
         res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
         return res.end(jpeg);
       } catch (e) {
         // Nothing retained live — serve the last persisted thumbnail if we have one.
         try {
           const cached = await fs.promises.readFile(file);
+          ctx.eventLog(`/event-image ${sn} → 200 cached thumbnail (${cached.length}B, from disk) — Last event served`);
           res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
           return res.end(cached);
         } catch {
           // No live and no persisted image. Surface the SDK reason (not-observed / pending /
           // download-failed / invalid-image) so a caller can tell "no event yet" from a failure.
+          ctx.eventLog(`/event-image ${sn} → 404 no image (reason=${e?.reason ?? e?.message ?? e}) — Last event NOT updated`);
           return json(res, 404, { error: String(e?.message ?? e), reason: e?.reason });
         }
       }

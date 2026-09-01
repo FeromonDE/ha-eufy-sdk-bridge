@@ -27,11 +27,12 @@ import { createWsServer } from "./src/ws-server.mjs";
 import { closeStreamClients } from "./streams.mjs";
 
 const config = loadConfig();
-const { cfg, DEBUG, DEBUG_P2P, eventImageDir } = config;
+const { cfg, DEBUG, DEBUG_P2P, EVENT_LOG, eventImageDir } = config;
 
 // last-event thumbnails live in the (mounted) data dir alongside the session file.
 fs.mkdirSync(eventImageDir, { recursive: true });
 if (DEBUG) console.log(`[bridge] BRIDGE_DEBUG on — verbose logging (p2p-firehose ${DEBUG_P2P ? "on" : "off"})`);
+if (EVENT_LOG) console.log('[bridge] event log ON — "[bridge:event]" lines trace each push event + "Last event" image fetch (set BRIDGE_EVENT_LOG=0 to silence)');
 if (!cfg.email || !cfg.password) {
   console.error("[bridge] EUFY_EMAIL and EUFY_PASSWORD are required");
   process.exit(1);
