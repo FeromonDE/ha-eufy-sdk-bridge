@@ -121,18 +121,27 @@ export function createWarmup(ctx) {
     }
     // Keep the newest record per device (max start_time), then take its crop path. Ties (or a firmware
     // that omits start_time) fall back to last-wins, matching the old behaviour for that degenerate case.
+    // Also track, per device, how many records mention it and the newest ts seen even when it has no crop
+    // — so a stale/"unchanged" cover can be told apart from a newer record we skipped for lacking a crop.
     const newest = new Map(); // device_sn -> { ts, path }
+    const seen = new Map(); // device_sn -> { count, maxTs, maxTsHasCrop }
     for (const rec of records) {
       const dsn = rec?.device_sn;
-      const p = cropPathOf(rec);
-      if (!dsn || !p) continue;
+      if (!dsn) continue;
       const ts = recordTime(rec);
+      const p = cropPathOf(rec);
+      const s = seen.get(dsn) ?? { count: 0, maxTs: -1, maxTsHasCrop: false };
+      s.count += 1;
+      if (ts > s.maxTs) {
+        s.maxTs = ts;
+        s.maxTsHasCrop = Boolean(p);
+      }
+      seen.set(dsn, s);
+      if (!p) continue;
       const cur = newest.get(dsn);
       if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p });
     }
-    const covers = new Map();
-    for (const [dsn, { path: p }] of newest) covers.set(dsn, p);
-    return covers;
+    return { covers: newest, recordCount: records.length, seen };
   }
 
   /** Request one on-HomeBase cover path over P2P and return its JPEG bytes (≤8s), or undefined. */
@@ -213,10 +222,10 @@ export function createWarmup(ctx) {
           for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500); // await handshake
           if (!session.isConnected) continue;
 
-          const covers = await queryStationCovers(session, accountId);
+          const { covers } = await queryStationCovers(session, accountId);
           if (!covers.size) continue;
 
-          for (const [dsn, filePath] of covers) {
+          for (const [dsn, { path: filePath }] of covers) {
             const data = await fetchImage(session, filePath, accountId);
             if (data && persistIfChanged(dsn, data)) {
               console.log(`[bridge] warmed last-event image for ${dsn} (${data.length}B, local)`);
@@ -246,19 +255,38 @@ export function createWarmup(ctx) {
         const accountId = await accountIdOf(devs);
         for (const [, session] of sessions) {
           if (!session.isConnected) continue;
-          const covers = await queryStationCovers(session, accountId);
-          const filePath = covers.get(sn);
-          if (!filePath) continue; // this device isn't on this station — try the next
+          const { covers, recordCount, seen } = await queryStationCovers(session, accountId);
+          const entry = covers.get(sn);
+          if (!entry) {
+            // Diagnostic: did this station return records for this device at all? If it has a newer record
+            // whose newest ts carries NO crop, that's "HomeBase wrote the event but not (yet) a crop";
+            // if no records mention it, this simply isn't its station.
+            const s = seen?.get(sn);
+            if (s) {
+              ctx.eventLog?.(
+                `local refresh: ${sn} — no crop in its ${s.count} record(s) here ` +
+                  `(newest ts=${s.maxTs}, hasCrop=${s.maxTsHasCrop}; ${recordCount} total)`,
+              );
+            }
+            continue; // this device isn't on this station — try the next
+          }
+          const filePath = entry.path;
+          const crop = filePath.split("/").pop();
           const data = await fetchImage(session, filePath, accountId);
           if (!data) {
-            ctx.eventLog?.(`local refresh: ${sn} — cover fetch returned no image`);
+            ctx.eventLog?.(`local refresh: ${sn} — cover fetch returned no image (crop=${crop})`);
             return false;
           }
           if (persistIfChanged(sn, data)) {
-            ctx.eventLog?.(`local refresh: ${sn} → last-event image updated (${data.length}B, local)`);
+            ctx.eventLog?.(
+              `local refresh: ${sn} → last-event image updated (${data.length}B, local) ` +
+                `[ts=${entry.ts} crop=${crop} of ${recordCount} recs]`,
+            );
             return true;
           }
-          ctx.eventLog?.(`local refresh: ${sn} — cover unchanged (${data.length}B)`);
+          ctx.eventLog?.(
+            `local refresh: ${sn} — cover unchanged (${data.length}B) [ts=${entry.ts} crop=${crop} of ${recordCount} recs]`,
+          );
           return false;
         }
         ctx.eventLog?.(`local refresh: ${sn} — no local cover found on any connected station`);
