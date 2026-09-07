@@ -80,7 +80,12 @@ export function createHttpHandler(ctx) {
         // Nothing retained live — serve the last persisted thumbnail if we have one.
         try {
           const cached = await fs.promises.readFile(file);
-          ctx.eventLog(`/event-image ${sn} → 200 cached thumbnail (${cached.length}B, from disk) — Last event served`);
+          // Include WHY the live cache was empty (not-observed / pending / download-failed / invalid-image)
+          // even though we can still serve a disk copy — on a local-storage account this is expected to be
+          // "not-observed" (no push thumbnail), and the on-detection local refresh is what advances it.
+          ctx.eventLog(
+            `/event-image ${sn} → 200 cached thumbnail (${cached.length}B, from disk; live unavailable: ${e?.reason ?? e?.message ?? e}) — Last event served`,
+          );
           res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
           return res.end(cached);
         } catch {

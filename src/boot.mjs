@@ -36,7 +36,12 @@ export function createBoot(ctx) {
         eufy.on(e, (payload) => {
           ctx.bumpActivity();
           const detection = DETECTION_EVENTS.has(e);
-          if (detection) ctx.noteDetection(payload?.deviceSn);
+          if (detection) {
+            ctx.noteDetection(payload?.deviceSn);
+            // Local-storage accounts get no push thumbnail, so pull the fresh event cover from HomeBase
+            // storage and (if it changed) nudge HA to re-fetch — otherwise "Last event" stays frozen.
+            ctx.onDetectionRefresh?.(payload?.deviceSn);
+          }
           // Narrow event trace (on by default): a push/semantic event arrived — say what it is, which
           // device, whether it's a detection (which is what makes HA refresh "Last event"), and how many
           // frontend clients it reaches. 0 clients means HA is not connected, so nothing updates there.
