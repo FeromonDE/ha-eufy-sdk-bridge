@@ -270,23 +270,66 @@ export function createWarmup(ctx) {
     });
   }
 
+  /**
+   * Advance "Last event" from the SDK's PUSHED thumbnail (cloud `pic_url`) — the path a doorbell / cloud
+   * camera uses (its P2P `history_record_info` returns nothing, so {@link refreshLastEventImageFor} can't
+   * help it). `StoredImageCache` downloads the thumbnail lazily and emits no "ready" event, so right after
+   * the push `snapshotStored()` is often still `pending`/`download-failed`; HA's immediate fetch then gets
+   * the stale disk copy and never re-fetches. So we retry across a bounded window and persist+report the
+   * moment a NEW image lands, letting the caller nudge HA. `not-observed`/`invalid-image` mean there is no
+   * pushed thumbnail (a pure local-storage cam) — give up immediately and let the P2P path handle it.
+   */
+  async function refreshStoredSnapshotFor(sn) {
+    let cam;
+    try {
+      cam = (await eufy.getDevice(sn)).camera?.();
+    } catch {
+      return false;
+    }
+    if (!cam?.snapshotStored) return false;
+    for (let i = 0; i < 12; i++) {
+      // ~30s total (12 × 2.5s) — long enough for a slow cloud thumbnail download to land.
+      let jpeg;
+      try {
+        jpeg = await cam.snapshotStored();
+      } catch (e) {
+        const reason = e?.reason ?? e?.message ?? e;
+        if (reason !== "pending" && reason !== "download-failed") return false; // not-observed / invalid
+        await sleep(2500);
+        continue;
+      }
+      if (jpeg?.length && persistIfChanged(sn, jpeg)) {
+        ctx.eventLog?.(`stored snapshot: ${sn} → last-event image updated (${jpeg.length}B, push)`);
+        return true;
+      }
+      return false; // got bytes but unchanged — nothing new to nudge about
+    }
+    ctx.eventLog?.(`stored snapshot: ${sn} — no push thumbnail landed in time`);
+    return false;
+  }
+
   // Debounce per device: a burst of pushes (auto-track fires many) collapses to one delayed refresh,
   // which also gives the HomeBase time to write the new event's cover before we query for it.
   const pendingRefresh = new Map(); // sn -> timer
   function onDetectionRefresh(sn) {
     if (!sn || pendingRefresh.has(sn)) return;
+    const nudge = (changed) => {
+      // Tell HA to re-pull /event-image now that the disk file advanced — the detection broadcast that
+      // triggered this already fired (and fetched the still-stale image), so without this nudge HA would
+      // not update until its next poll.
+      if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
+    };
     const timer = setTimeout(() => {
       pendingRefresh.delete(sn);
-      void refreshLastEventImageFor(sn).then((changed) => {
-        // Tell HA to re-pull /event-image now that the disk file advanced — the detection broadcast that
-        // triggered this already fired (and fetched the still-stale image), so without this nudge HA would
-        // not update until its next poll.
-        if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
-      });
+      // Two independent sources, whichever applies to this device: the pushed cloud thumbnail (doorbell /
+      // cloud cams) and the on-HomeBase local cover (local-storage cams). They don't share the P2P DB
+      // lock, so run both; each nudges HA on its own when it lands a fresh image.
+      void refreshStoredSnapshotFor(sn).then(nudge);
+      void refreshLastEventImageFor(sn).then(nudge);
     }, REFRESH_DELAY_MS);
     timer.unref?.();
     pendingRefresh.set(sn, timer);
   }
 
-  return { warmFaceRoster, warmLastEventImages, refreshLastEventImageFor, onDetectionRefresh };
+  return { warmFaceRoster, warmLastEventImages, refreshLastEventImageFor, refreshStoredSnapshotFor, onDetectionRefresh };
 }
