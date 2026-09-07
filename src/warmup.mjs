@@ -44,26 +44,74 @@ export function createWarmup(ctx) {
     return sessions;
   }
 
+  // Standard "read the whole table" query the app uses (inner cmd 10000). We only need the newest few
+  // rows, so `count` is modest — but ordering isn't guaranteed, so we still sort by `start_time` below.
+  const HISTORY_TABLE_QUERY = {
+    count: 200,
+    start_date: "",
+    end_date: "",
+    start_id: 0,
+    end_id: 1,
+    flag: 0,
+    need_ai: 1,
+    res_unzip: 1,
+    update_time: "0",
+    start_time: "0",
+    alarm_id: "",
+  };
+
+  /** The on-HomeBase crop path for a history record — field name varies by firmware, so try each. */
+  function cropPathOf(rec) {
+    const pl = rec?.payload ?? rec;
+    const p = pl?.crop_hb3_path || pl?.crop_path || pl?.thumb_path || pl?.thumbnail_path || pl?.pic_path;
+    return typeof p === "string" && p ? p : undefined;
+  }
+
+  /** Recency key for a history record (epoch-ish); higher = newer. 0 when the firmware omits it. */
+  function recordTime(rec) {
+    const pl = rec?.payload ?? {};
+    return Number(rec?.start_time ?? rec?.create_time ?? pl.start_time ?? pl.create_time ?? 0) || 0;
+  }
+
   /**
-   * Query one station's latest event per device over P2P (history_record_info, cmd 10013 / mChannel 0)
-   * and return `device_sn -> on-HomeBase cover path` (the plain-JPEG crop the /event-image serves).
+   * Query each device's LATEST event cover over P2P and return `device_sn -> on-HomeBase cover path`
+   * (the plain-JPEG crop the /event-image serves).
+   *
+   * Uses the DIRECT table read of `history_record_info` (inner cmd **10000**, mChannel **255** — the
+   * station channel), NOT the old `10013`. Per the reversed P2P catalog (eufy-mega docs/p2p/faces.md)
+   * 10013 is only a "sync/poke" that returns a cached "latest" snapshot which never advances as new
+   * events complete — which is why the crop came back byte-identical run-to-run and "Last event" never
+   * moved; ch0 also returns nothing on a HomeBase (DB reads live on 255). We then pick, per device, the
+   * record with the greatest `start_time` and use its crop path.
+   *
    * Sent twice (the first can be dropped during handshake). Caller must hold the DB lock.
    */
   async function queryStationCovers(session, accountId) {
     let chunk = "";
     const onChunk = ({ text }) => (chunk += text);
     session.on("dbChunk", onChunk);
-    session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 });
-    setTimeout(() => session.isConnected && session.queryDatabase("history_record_info", { accountId, channel: 0, innerCmd: 10013 }), 1500);
+    const send = () =>
+      session.isConnected &&
+      session.queryDatabase("history_record_info", { accountId, innerCmd: 10000, query: HISTORY_TABLE_QUERY });
+    send();
+    setTimeout(send, 1500);
     await sleep(6000);
     session.off?.("dbChunk", onChunk);
 
     const records = firstJsonObject(chunk)?.data ?? [];
-    const covers = new Map();
+    // Keep the newest record per device (max start_time), then take its crop path. Ties (or a firmware
+    // that omits start_time) fall back to last-wins, matching the old behaviour for that degenerate case.
+    const newest = new Map(); // device_sn -> { ts, path }
     for (const rec of records) {
-      const p = rec?.payload?.crop_hb3_path;
-      if (rec?.device_sn && typeof p === "string" && p) covers.set(rec.device_sn, p);
+      const dsn = rec?.device_sn;
+      const p = cropPathOf(rec);
+      if (!dsn || !p) continue;
+      const ts = recordTime(rec);
+      const cur = newest.get(dsn);
+      if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p });
     }
+    const covers = new Map();
+    for (const [dsn, { path: p }] of newest) covers.set(dsn, p);
     return covers;
   }
 
