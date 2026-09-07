@@ -46,8 +46,10 @@ export function createWarmup(ctx) {
 
   // Standard "read the whole table" query the app uses (inner cmd 10000). We only need the newest few
   // rows, so `count` is modest — but ordering isn't guaranteed, so we still sort by `start_time` below.
+  // Kept small (50): the direct read spans many P2P datagrams, and a big response often didn't finish
+  // reassembling before we parsed it, which returned no records ("no local cover found") intermittently.
   const HISTORY_TABLE_QUERY = {
-    count: 200,
+    count: 50,
     start_date: "",
     end_date: "",
     start_id: 0,
@@ -95,10 +97,28 @@ export function createWarmup(ctx) {
       session.queryDatabase("history_record_info", { accountId, innerCmd: 10000, query: HISTORY_TABLE_QUERY });
     send();
     setTimeout(send, 1500);
-    await sleep(6000);
+
+    // Poll for a FULLY-reassembled response rather than parsing once after a fixed wait: the direct read
+    // can span many datagrams, and a fixed 6s window frequently closed mid-reassembly → `firstJsonObject`
+    // returned nothing → "no local cover found" even though the cover existed. Exit as soon as we have a
+    // parseable object carrying `data[]`; give it up to ~14s (the resend lands at 1.5s).
+    let parsed;
+    for (let i = 0; i < 70; i++) {
+      await sleep(200);
+      const obj = firstJsonObject(chunk);
+      if (obj && Array.isArray(obj.data) && obj.data.length) {
+        parsed = obj;
+        break;
+      }
+    }
     session.off?.("dbChunk", onChunk);
 
-    const records = firstJsonObject(chunk)?.data ?? [];
+    const records = parsed?.data ?? firstJsonObject(chunk)?.data ?? [];
+    if (!records.length) {
+      // Diagnostic: distinguish "response never arrived" (chunk empty) from "arrived but unparseable /
+      // no data" (chunk large) so a recurring failure points straight at transport vs shape.
+      ctx.eventLog?.(`history query: no records parsed (raw ${chunk.length}B received)`);
+    }
     // Keep the newest record per device (max start_time), then take its crop path. Ties (or a firmware
     // that omits start_time) fall back to last-wins, matching the old behaviour for that degenerate case.
     const newest = new Map(); // device_sn -> { ts, path }
@@ -250,23 +270,66 @@ export function createWarmup(ctx) {
     });
   }
 
+  /**
+   * Advance "Last event" from the SDK's PUSHED thumbnail (cloud `pic_url`) — the path a doorbell / cloud
+   * camera uses (its P2P `history_record_info` returns nothing, so {@link refreshLastEventImageFor} can't
+   * help it). `StoredImageCache` downloads the thumbnail lazily and emits no "ready" event, so right after
+   * the push `snapshotStored()` is often still `pending`/`download-failed`; HA's immediate fetch then gets
+   * the stale disk copy and never re-fetches. So we retry across a bounded window and persist+report the
+   * moment a NEW image lands, letting the caller nudge HA. `not-observed`/`invalid-image` mean there is no
+   * pushed thumbnail (a pure local-storage cam) — give up immediately and let the P2P path handle it.
+   */
+  async function refreshStoredSnapshotFor(sn) {
+    let cam;
+    try {
+      cam = (await eufy.getDevice(sn)).camera?.();
+    } catch {
+      return false;
+    }
+    if (!cam?.snapshotStored) return false;
+    for (let i = 0; i < 12; i++) {
+      // ~30s total (12 × 2.5s) — long enough for a slow cloud thumbnail download to land.
+      let jpeg;
+      try {
+        jpeg = await cam.snapshotStored();
+      } catch (e) {
+        const reason = e?.reason ?? e?.message ?? e;
+        if (reason !== "pending" && reason !== "download-failed") return false; // not-observed / invalid
+        await sleep(2500);
+        continue;
+      }
+      if (jpeg?.length && persistIfChanged(sn, jpeg)) {
+        ctx.eventLog?.(`stored snapshot: ${sn} → last-event image updated (${jpeg.length}B, push)`);
+        return true;
+      }
+      return false; // got bytes but unchanged — nothing new to nudge about
+    }
+    ctx.eventLog?.(`stored snapshot: ${sn} — no push thumbnail landed in time`);
+    return false;
+  }
+
   // Debounce per device: a burst of pushes (auto-track fires many) collapses to one delayed refresh,
   // which also gives the HomeBase time to write the new event's cover before we query for it.
   const pendingRefresh = new Map(); // sn -> timer
   function onDetectionRefresh(sn) {
     if (!sn || pendingRefresh.has(sn)) return;
+    const nudge = (changed) => {
+      // Tell HA to re-pull /event-image now that the disk file advanced — the detection broadcast that
+      // triggered this already fired (and fetched the still-stale image), so without this nudge HA would
+      // not update until its next poll.
+      if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
+    };
     const timer = setTimeout(() => {
       pendingRefresh.delete(sn);
-      void refreshLastEventImageFor(sn).then((changed) => {
-        // Tell HA to re-pull /event-image now that the disk file advanced — the detection broadcast that
-        // triggered this already fired (and fetched the still-stale image), so without this nudge HA would
-        // not update until its next poll.
-        if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
-      });
+      // Two independent sources, whichever applies to this device: the pushed cloud thumbnail (doorbell /
+      // cloud cams) and the on-HomeBase local cover (local-storage cams). They don't share the P2P DB
+      // lock, so run both; each nudges HA on its own when it lands a fresh image.
+      void refreshStoredSnapshotFor(sn).then(nudge);
+      void refreshLastEventImageFor(sn).then(nudge);
     }, REFRESH_DELAY_MS);
     timer.unref?.();
     pendingRefresh.set(sn, timer);
   }
 
-  return { warmFaceRoster, warmLastEventImages, refreshLastEventImageFor, onDetectionRefresh };
+  return { warmFaceRoster, warmLastEventImages, refreshLastEventImageFor, refreshStoredSnapshotFor, onDetectionRefresh };
 }
