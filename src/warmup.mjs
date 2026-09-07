@@ -139,7 +139,7 @@ export function createWarmup(ctx) {
       seen.set(dsn, s);
       if (!p) continue;
       const cur = newest.get(dsn);
-      if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p });
+      if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p, rec });
     }
     return { covers: newest, recordCount: records.length, seen };
   }
@@ -287,6 +287,18 @@ export function createWarmup(ctx) {
           ctx.eventLog?.(
             `local refresh: ${sn} — cover unchanged (${data.length}B) [ts=${entry.ts} crop=${crop} of ${recordCount} recs]`,
           );
+          // One-shot structure dump on the failing path: the picked record's field names + a truncated
+          // JSON, so we can find the REAL per-event crop-path field and timestamp (crop_hb3_path here is a
+          // generic rolling "snapshort.jpg" and start_time reads 0). Trimmed to keep the log sane.
+          try {
+            const rec = entry.rec ?? {};
+            const keys = Object.keys(rec).join(",");
+            const pkeys = Object.keys(rec.payload ?? {}).join(",");
+            ctx.eventLog?.(`local refresh: ${sn} — record keys=[${keys}] payload=[${pkeys}]`);
+            ctx.eventLog?.(`local refresh: ${sn} — record sample=${JSON.stringify(rec).slice(0, 700)}`);
+          } catch {
+            /* best-effort diagnostic */
+          }
           return false;
         }
         ctx.eventLog?.(`local refresh: ${sn} — no local cover found on any connected station`);
