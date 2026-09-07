@@ -62,17 +62,40 @@ export function createWarmup(ctx) {
     alarm_id: "",
   };
 
-  /** The on-HomeBase crop path for a history record — field name varies by firmware, so try each. */
+  /**
+   * The on-HomeBase per-event crop path for a `history_record_info` record.
+   *
+   * On HomeBase-3 local storage the record has NO dedicated crop field — only a bare `thumb_path`
+   * ("snapshort.jpg") that resolves to one generic rolling image (so bytes never change), plus a
+   * `storage_path` = the event's recording under a per-event directory
+   * (…/<yyyymmddHHMMSS>/<…>.zxvid). The event still lives beside the video, so we join the recording's
+   * DIRECTORY with the thumb filename → a path that's unique per event and actually advances. Absolute
+   * crop fields (other firmwares) are used as-is; a bare thumb with no storage_path is the last resort.
+   */
   function cropPathOf(rec) {
     const pl = rec?.payload ?? rec;
-    const p = pl?.crop_hb3_path || pl?.crop_path || pl?.thumb_path || pl?.thumbnail_path || pl?.pic_path;
-    return typeof p === "string" && p ? p : undefined;
+    const absolute = pl?.crop_hb3_path || pl?.crop_path || pl?.pic_path;
+    if (typeof absolute === "string" && absolute.startsWith("/")) return absolute;
+
+    const thumb = pl?.thumb_path || pl?.thumbnail_path || absolute;
+    if (typeof thumb !== "string" || !thumb) return undefined;
+    if (thumb.startsWith("/")) return thumb; // already a full path
+    const storage = pl?.storage_path;
+    if (typeof storage === "string" && storage.includes("/")) {
+      const dir = storage.slice(0, storage.lastIndexOf("/"));
+      if (dir) return `${dir}/${thumb}`; // per-event dir + thumb filename
+    }
+    return thumb; // bare filename fallback (generic, but better than nothing)
   }
 
-  /** Recency key for a history record (epoch-ish); higher = newer. 0 when the firmware omits it. */
+  /** Recency key for a history record; higher = newer. `record_id` is monotonic per event; fall back to
+   * the `start_time`/`end_time` datetime string (epoch ms). 0 only when the firmware gives us nothing. */
   function recordTime(rec) {
-    const pl = rec?.payload ?? {};
-    return Number(rec?.start_time ?? rec?.create_time ?? pl.start_time ?? pl.create_time ?? 0) || 0;
+    const pl = rec?.payload ?? rec;
+    const rid = Number(pl?.record_id ?? rec?.record_id);
+    if (Number.isFinite(rid) && rid > 0) return rid;
+    const t = Date.parse(pl?.start_time ?? pl?.end_time ?? pl?.create_time ?? "");
+    return Number.isFinite(t) ? t : 0;
   }
 
   /**
