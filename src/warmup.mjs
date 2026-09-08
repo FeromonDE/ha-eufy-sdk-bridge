@@ -62,17 +62,40 @@ export function createWarmup(ctx) {
     alarm_id: "",
   };
 
-  /** The on-HomeBase crop path for a history record — field name varies by firmware, so try each. */
+  /**
+   * The on-HomeBase per-event crop path for a `history_record_info` record.
+   *
+   * On HomeBase-3 local storage the record has NO dedicated crop field — only a bare `thumb_path`
+   * ("snapshort.jpg") that resolves to one generic rolling image (so bytes never change), plus a
+   * `storage_path` = the event's recording under a per-event directory
+   * (…/<yyyymmddHHMMSS>/<…>.zxvid). The event still lives beside the video, so we join the recording's
+   * DIRECTORY with the thumb filename → a path that's unique per event and actually advances. Absolute
+   * crop fields (other firmwares) are used as-is; a bare thumb with no storage_path is the last resort.
+   */
   function cropPathOf(rec) {
     const pl = rec?.payload ?? rec;
-    const p = pl?.crop_hb3_path || pl?.crop_path || pl?.thumb_path || pl?.thumbnail_path || pl?.pic_path;
-    return typeof p === "string" && p ? p : undefined;
+    const absolute = pl?.crop_hb3_path || pl?.crop_path || pl?.pic_path;
+    if (typeof absolute === "string" && absolute.startsWith("/")) return absolute;
+
+    const thumb = pl?.thumb_path || pl?.thumbnail_path || absolute;
+    if (typeof thumb !== "string" || !thumb) return undefined;
+    if (thumb.startsWith("/")) return thumb; // already a full path
+    const storage = pl?.storage_path;
+    if (typeof storage === "string" && storage.includes("/")) {
+      const dir = storage.slice(0, storage.lastIndexOf("/"));
+      if (dir) return `${dir}/${thumb}`; // per-event dir + thumb filename
+    }
+    return thumb; // bare filename fallback (generic, but better than nothing)
   }
 
-  /** Recency key for a history record (epoch-ish); higher = newer. 0 when the firmware omits it. */
+  /** Recency key for a history record; higher = newer. `record_id` is monotonic per event; fall back to
+   * the `start_time`/`end_time` datetime string (epoch ms). 0 only when the firmware gives us nothing. */
   function recordTime(rec) {
-    const pl = rec?.payload ?? {};
-    return Number(rec?.start_time ?? rec?.create_time ?? pl.start_time ?? pl.create_time ?? 0) || 0;
+    const pl = rec?.payload ?? rec;
+    const rid = Number(pl?.record_id ?? rec?.record_id);
+    if (Number.isFinite(rid) && rid > 0) return rid;
+    const t = Date.parse(pl?.start_time ?? pl?.end_time ?? pl?.create_time ?? "");
+    return Number.isFinite(t) ? t : 0;
   }
 
   /**
@@ -121,18 +144,27 @@ export function createWarmup(ctx) {
     }
     // Keep the newest record per device (max start_time), then take its crop path. Ties (or a firmware
     // that omits start_time) fall back to last-wins, matching the old behaviour for that degenerate case.
+    // Also track, per device, how many records mention it and the newest ts seen even when it has no crop
+    // — so a stale/"unchanged" cover can be told apart from a newer record we skipped for lacking a crop.
     const newest = new Map(); // device_sn -> { ts, path }
+    const seen = new Map(); // device_sn -> { count, maxTs, maxTsHasCrop }
     for (const rec of records) {
       const dsn = rec?.device_sn;
-      const p = cropPathOf(rec);
-      if (!dsn || !p) continue;
+      if (!dsn) continue;
       const ts = recordTime(rec);
+      const p = cropPathOf(rec);
+      const s = seen.get(dsn) ?? { count: 0, maxTs: -1, maxTsHasCrop: false };
+      s.count += 1;
+      if (ts > s.maxTs) {
+        s.maxTs = ts;
+        s.maxTsHasCrop = Boolean(p);
+      }
+      seen.set(dsn, s);
+      if (!p) continue;
       const cur = newest.get(dsn);
-      if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p });
+      if (!cur || ts >= cur.ts) newest.set(dsn, { ts, path: p, rec });
     }
-    const covers = new Map();
-    for (const [dsn, { path: p }] of newest) covers.set(dsn, p);
-    return covers;
+    return { covers: newest, recordCount: records.length, seen };
   }
 
   /** Request one on-HomeBase cover path over P2P and return its JPEG bytes (≤8s), or undefined. */
@@ -213,10 +245,10 @@ export function createWarmup(ctx) {
           for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500); // await handshake
           if (!session.isConnected) continue;
 
-          const covers = await queryStationCovers(session, accountId);
+          const { covers } = await queryStationCovers(session, accountId);
           if (!covers.size) continue;
 
-          for (const [dsn, filePath] of covers) {
+          for (const [dsn, { path: filePath }] of covers) {
             const data = await fetchImage(session, filePath, accountId);
             if (data && persistIfChanged(dsn, data)) {
               console.log(`[bridge] warmed last-event image for ${dsn} (${data.length}B, local)`);
@@ -246,19 +278,50 @@ export function createWarmup(ctx) {
         const accountId = await accountIdOf(devs);
         for (const [, session] of sessions) {
           if (!session.isConnected) continue;
-          const covers = await queryStationCovers(session, accountId);
-          const filePath = covers.get(sn);
-          if (!filePath) continue; // this device isn't on this station — try the next
+          const { covers, recordCount, seen } = await queryStationCovers(session, accountId);
+          const entry = covers.get(sn);
+          if (!entry) {
+            // Diagnostic: did this station return records for this device at all? If it has a newer record
+            // whose newest ts carries NO crop, that's "HomeBase wrote the event but not (yet) a crop";
+            // if no records mention it, this simply isn't its station.
+            const s = seen?.get(sn);
+            if (s) {
+              ctx.eventLog?.(
+                `local refresh: ${sn} — no crop in its ${s.count} record(s) here ` +
+                  `(newest ts=${s.maxTs}, hasCrop=${s.maxTsHasCrop}; ${recordCount} total)`,
+              );
+            }
+            continue; // this device isn't on this station — try the next
+          }
+          const filePath = entry.path;
+          const crop = filePath.split("/").pop();
           const data = await fetchImage(session, filePath, accountId);
           if (!data) {
-            ctx.eventLog?.(`local refresh: ${sn} — cover fetch returned no image`);
+            ctx.eventLog?.(`local refresh: ${sn} — cover fetch returned no image (crop=${crop})`);
             return false;
           }
           if (persistIfChanged(sn, data)) {
-            ctx.eventLog?.(`local refresh: ${sn} → last-event image updated (${data.length}B, local)`);
+            ctx.eventLog?.(
+              `local refresh: ${sn} → last-event image updated (${data.length}B, local) ` +
+                `[ts=${entry.ts} crop=${crop} of ${recordCount} recs]`,
+            );
             return true;
           }
-          ctx.eventLog?.(`local refresh: ${sn} — cover unchanged (${data.length}B)`);
+          ctx.eventLog?.(
+            `local refresh: ${sn} — cover unchanged (${data.length}B) [ts=${entry.ts} crop=${crop} of ${recordCount} recs]`,
+          );
+          // One-shot structure dump on the failing path: the picked record's field names + a truncated
+          // JSON, so we can find the REAL per-event crop-path field and timestamp (crop_hb3_path here is a
+          // generic rolling "snapshort.jpg" and start_time reads 0). Trimmed to keep the log sane.
+          try {
+            const rec = entry.rec ?? {};
+            const keys = Object.keys(rec).join(",");
+            const pkeys = Object.keys(rec.payload ?? {}).join(",");
+            ctx.eventLog?.(`local refresh: ${sn} — record keys=[${keys}] payload=[${pkeys}]`);
+            ctx.eventLog?.(`local refresh: ${sn} — record sample=${JSON.stringify(rec).slice(0, 700)}`);
+          } catch {
+            /* best-effort diagnostic */
+          }
           return false;
         }
         ctx.eventLog?.(`local refresh: ${sn} — no local cover found on any connected station`);

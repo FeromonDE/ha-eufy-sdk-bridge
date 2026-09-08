@@ -3,6 +3,7 @@
 // client set and the two fan-out helpers (`send`, `broadcast`) that the rest of the bridge publishes
 // through — returned so server.mjs can hang them on ctx for auth.mjs / boot.mjs / http-routes.mjs.
 import { WebSocketServer } from "ws";
+import { listLightEffects } from "@mega-yfue/eufy-sdk";
 
 export function createWsServer(ctx, httpServer) {
   const { cfg, eufy, SCHEMA_VERSION, DEBUG, dbg } = ctx;
@@ -15,6 +16,10 @@ export function createWsServer(ctx, httpServer) {
     const s = JSON.stringify(obj);
     for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
   };
+
+  // The smart-light effect gallery is account-wide and costs several HTTP round-trips to enumerate,
+  // so fetch it once and cache it (a client can force a refresh with `{ refresh: true }`).
+  let effectsCache = null;
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
   wss.on("connection", (ws) => {
@@ -61,7 +66,9 @@ export function createWsServer(ctx, httpServer) {
         case "device.state":
         case "device.properties":
         case "device.set":
+        case "device.action":
         case "device.reboot":
+        case "light.effects":
         case "config.get":
         case "config.set":
         case "stream.start":
@@ -90,10 +97,50 @@ export function createWsServer(ctx, httpServer) {
           }
           return reply({});
         }
+        case "device.action": {
+          // Invoke a capability ACTION — a typed method that isn't a scalar writable property, so
+          // `device.set` can't reach it (e.g. smart_light setColor({red,green,blue}) / setEffect(id)).
+          // `{ sn, action, args? }`; args is the positional argument list. Only capability-surface
+          // methods are reachable — the same controls the SDK intends a caller to invoke.
+          const action = String(msg.action ?? "");
+          const args = Array.isArray(msg.args) ? msg.args : [];
+          const dev = await eufy.getDevice(msg.sn);
+          // Capability surfaces that expose actions. Add more accessors here as needed.
+          const surfaces = [dev.smartLight?.(), dev.camera?.()].filter(Boolean);
+          const surface = surfaces.find((s) => typeof s?.[action] === "function");
+          if (!surface) return fail(`no action '${action}' on ${msg.sn}`);
+          const t0 = Date.now();
+          dbg(`device.action → ${action} sn=${msg.sn} args=${JSON.stringify(args)}`);
+          try {
+            const result = await surface[action](...args);
+            dbg(`device.action OK ${action} sn=${msg.sn} (${Date.now() - t0}ms)`);
+            return reply({ result: result ?? null });
+          } catch (e) {
+            console.error(`[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+            throw e;
+          }
+        }
         case "device.reboot": {
           // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
           await eufy.reboot(msg.sn);
           return reply({});
+        }
+        case "light.effects": {
+          // The smart-light effect gallery (id + display name) for HA's effect_list. Cached; pass
+          // { refresh:true } to rebuild. Only the entries the SDK can actually drive over the wire.
+          if (!effectsCache || msg.refresh) {
+            // The SDK exposes the gallery as a barrel export over the public `eufy.api` (MegaHttpClient)
+            // — no facade forwarder needed. Widen the scan past the default 10001-10999: devices also
+            // carry effects in the 20000 band (e.g. 20006 on a T8L02), and batchget returns only ids
+            // that exist, so a wider window just enumerates more. NB: this is ~110 sequential batchget
+            // round-trips + discover/list on a cold cache — hence the module-level cache above.
+            const all = await listLightEffects(eufy.api, { idRange: [10001, 20999] });
+            effectsCache = all
+              .filter((e) => e.buildable)
+              .map((e) => ({ id: e.lightId, name: e.name || `Effect ${e.lightId}`, colors: e.colors }));
+            dbg(`light.effects → ${effectsCache.length} buildable effect(s)`);
+          }
+          return reply({ effects: effectsCache });
         }
 
         case "config.get":
