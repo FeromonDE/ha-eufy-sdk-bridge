@@ -128,7 +128,10 @@ export function createWsServer(ctx, httpServer) {
           // The smart-light effect gallery (id + display name) for HA's effect_list. Cached; pass
           // { refresh:true } to rebuild. Only the entries the SDK can actually drive over the wire.
           if (!effectsCache || msg.refresh) {
-            const all = await eufy.listLightEffects();
+            // Widen the scan past the default 10001-10999: devices also carry effects in the 20000
+            // band (e.g. 20006 seen live on a T8L02), and batchget only returns ids that exist, so a
+            // wider window just enumerates more without inventing entries.
+            const all = await eufy.listLightEffects({ idRange: [10001, 20999] });
             effectsCache = all
               .filter((e) => e.buildable)
               .map((e) => ({ id: e.lightId, name: e.name || `Effect ${e.lightId}`, colors: e.colors }));
