@@ -3,6 +3,7 @@
 // client set and the two fan-out helpers (`send`, `broadcast`) that the rest of the bridge publishes
 // through — returned so server.mjs can hang them on ctx for auth.mjs / boot.mjs / http-routes.mjs.
 import { WebSocketServer } from "ws";
+import { listLightEffects } from "@mega-yfue/eufy-sdk";
 
 export function createWsServer(ctx, httpServer) {
   const { cfg, eufy, SCHEMA_VERSION, DEBUG, dbg } = ctx;
@@ -128,10 +129,12 @@ export function createWsServer(ctx, httpServer) {
           // The smart-light effect gallery (id + display name) for HA's effect_list. Cached; pass
           // { refresh:true } to rebuild. Only the entries the SDK can actually drive over the wire.
           if (!effectsCache || msg.refresh) {
-            // Widen the scan past the default 10001-10999: devices also carry effects in the 20000
-            // band (e.g. 20006 seen live on a T8L02), and batchget only returns ids that exist, so a
-            // wider window just enumerates more without inventing entries.
-            const all = await eufy.listLightEffects({ idRange: [10001, 20999] });
+            // The SDK exposes the gallery as a barrel export over the public `eufy.api` (MegaHttpClient)
+            // — no facade forwarder needed. Widen the scan past the default 10001-10999: devices also
+            // carry effects in the 20000 band (e.g. 20006 on a T8L02), and batchget returns only ids
+            // that exist, so a wider window just enumerates more. NB: this is ~110 sequential batchget
+            // round-trips + discover/list on a cold cache — hence the module-level cache above.
+            const all = await listLightEffects(eufy.api, { idRange: [10001, 20999] });
             effectsCache = all
               .filter((e) => e.buildable)
               .map((e) => ({ id: e.lightId, name: e.name || `Effect ${e.lightId}`, colors: e.colors }));
