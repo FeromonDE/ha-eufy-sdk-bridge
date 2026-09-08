@@ -61,6 +61,7 @@ export function createWsServer(ctx, httpServer) {
         case "device.state":
         case "device.properties":
         case "device.set":
+        case "device.action":
         case "device.reboot":
         case "config.get":
         case "config.set":
@@ -89,6 +90,29 @@ export function createWsServer(ctx, httpServer) {
             throw e; // outer catch surfaces it to the frontend (+ triggers session recovery if kicked)
           }
           return reply({});
+        }
+        case "device.action": {
+          // Invoke a capability ACTION — a typed method that isn't a scalar writable property, so
+          // `device.set` can't reach it (e.g. smart_light setColor({red,green,blue}) / setEffect(id)).
+          // `{ sn, action, args? }`; args is the positional argument list. Only capability-surface
+          // methods are reachable — the same controls the SDK intends a caller to invoke.
+          const action = String(msg.action ?? "");
+          const args = Array.isArray(msg.args) ? msg.args : [];
+          const dev = await eufy.getDevice(msg.sn);
+          // Capability surfaces that expose actions. Add more accessors here as needed.
+          const surfaces = [dev.smartLight?.(), dev.camera?.()].filter(Boolean);
+          const surface = surfaces.find((s) => typeof s?.[action] === "function");
+          if (!surface) return fail(`no action '${action}' on ${msg.sn}`);
+          const t0 = Date.now();
+          dbg(`device.action → ${action} sn=${msg.sn} args=${JSON.stringify(args)}`);
+          try {
+            const result = await surface[action](...args);
+            dbg(`device.action OK ${action} sn=${msg.sn} (${Date.now() - t0}ms)`);
+            return reply({ result: result ?? null });
+          } catch (e) {
+            console.error(`[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+            throw e;
+          }
         }
         case "device.reboot": {
           // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
