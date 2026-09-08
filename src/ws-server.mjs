@@ -16,6 +16,10 @@ export function createWsServer(ctx, httpServer) {
     for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
   };
 
+  // The smart-light effect gallery is account-wide and costs several HTTP round-trips to enumerate,
+  // so fetch it once and cache it (a client can force a refresh with `{ refresh: true }`).
+  let effectsCache = null;
+
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
   wss.on("connection", (ws) => {
     clients.add(ws);
@@ -63,6 +67,7 @@ export function createWsServer(ctx, httpServer) {
         case "device.set":
         case "device.action":
         case "device.reboot":
+        case "light.effects":
         case "config.get":
         case "config.set":
         case "stream.start":
@@ -118,6 +123,18 @@ export function createWsServer(ctx, httpServer) {
           // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
           await eufy.reboot(msg.sn);
           return reply({});
+        }
+        case "light.effects": {
+          // The smart-light effect gallery (id + display name) for HA's effect_list. Cached; pass
+          // { refresh:true } to rebuild. Only the entries the SDK can actually drive over the wire.
+          if (!effectsCache || msg.refresh) {
+            const all = await eufy.listLightEffects();
+            effectsCache = all
+              .filter((e) => e.buildable)
+              .map((e) => ({ id: e.lightId, name: e.name || `Effect ${e.lightId}`, colors: e.colors }));
+            dbg(`light.effects → ${effectsCache.length} buildable effect(s)`);
+          }
+          return reply({ effects: effectsCache });
         }
 
         case "config.get":
