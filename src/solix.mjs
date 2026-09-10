@@ -31,6 +31,8 @@ export function createSolix(ctx) {
       capabilities: dev.capabilities,
       firmware: dev.firmware()?.version,
       online: dev.connectivity()?.online ?? null,
+      ssid: dev.connectivity()?.ssid ?? null, // the Wi-Fi network the device is on
+      rssi: dev.connectivity()?.rssi ?? null,
       values: dev.telemetry(), // decoded channels from the latest reading (empty until one arrives)
     };
   }

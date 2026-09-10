@@ -243,7 +243,8 @@ The account's Solix devices (empty until `state == "ready"`). *(Not gated by euf
 //       "source": "solix", "sn": "…", "productCode": "AE1X0", "name": "Smart Meter Gen 2",
 //       "category": "Accessory",
 //       "capabilities": ["identity", "firmware", "connectivity", "energyMeter"],
-//       "firmware": "V1.0.0.9", "online": true, "values": { "gridVoltage": 237.1 } } ] }
+//       "firmware": "V1.0.0.9", "online": true, "ssid": "Xman24", "rssi": -35,
+//       "values": { "gridVoltage": 237.1 } } ] }
 ```
 
 #### `solix.submitCode`
