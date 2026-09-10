@@ -223,6 +223,36 @@ Advisory only — the media connection closing is the real "stop". *(Requires au
 // ←  { "id": 8, "ok": true }
 ```
 
+### Anker Solix (`solix.*`)
+Optional — present only when the bridge has `SOLIX_EMAIL` / `SOLIX_PASSWORD` set. Solix is a **separate
+Anker account** on a separate backend, so these commands do **not** require the eufy `auth.state == "ok"`
+and are independent of the eufy device commands above.
+
+#### `solix.status`
+```jsonc
+// →  { "id": 9, "cmd": "solix.status" }
+// ←  { "id": 9, "ok": true, "solix": { "enabled": true, "state": "ready", "deviceCount": 1 } }
+```
+`state`: `disabled` | `connecting` | `2fa` | `ready` | `error`. `enabled` is `false` when `SOLIX_*` is unset.
+
+#### `solix.devices`
+The account's Solix devices (empty until `state == "ready"`). *(Not gated by eufy auth.)*
+```jsonc
+// →  { "id": 10, "cmd": "solix.devices" }
+// ←  { "id": 10, "ok": true, "devices": [ {
+//       "source": "solix", "sn": "…", "productCode": "AE1X0", "name": "Smart Meter Gen 2",
+//       "category": "Accessory",
+//       "capabilities": ["identity", "firmware", "connectivity", "energyMeter"],
+//       "firmware": "V1.0.0.9", "online": true, "values": { "gridVoltage": 237.1 } } ] }
+```
+
+#### `solix.submitCode`
+Complete a pending Solix 2FA (only when `state == "2fa"`). The code is never logged.
+```jsonc
+// →  { "id": 11, "cmd": "solix.submitCode", "code": "123456" }
+// ←  { "id": 11, "ok": true, "solix": { "enabled": true, "state": "ready", "deviceCount": 1 } }
+```
+
 ### Errors
 - Unknown command → `{ "id": n, "ok": false, "error": "unknown cmd: …" }`
 - A device command before auth → `{ "id": n, "ok": false, "error": "not authenticated — query auth.status and complete 2FA/captcha first" }`
@@ -259,6 +289,19 @@ Full set: `motion`, `personDetected`, `strangerDetected`, `doorbellPress`, `petD
 `packageDelivered`, `packageTaken`, `packageStranded`, `soundDetected`, `cryingDetected`,
 `vehicleDetected`, `dogDetected`, `armingModeChanged`, `alarm`, `lockState`, `contactState`,
 `batteryLevel`, `batteryAlert`, `ptzNotify`, `smartLightState`.
+
+### Anker Solix events
+Present only when Solix is configured (`SOLIX_*`).
+
+| event | payload | when |
+| --- | --- | --- |
+| `solixAuth` | `{ state, method?, error? }` | Solix login state changed (incl. `state: "2fa"`) |
+| `solixReady` | `{ devices: [...] }` | Solix devices discovered (same shape as `solix.devices`) |
+| `solixReading` | `{ deviceSn, productCode, values }` | a live telemetry frame |
+
+```json
+{ "event": "solixReading", "deviceSn": "…", "productCode": "AE1X0", "values": { "gridVoltage": 237.1 } }
+```
 
 Plus a stream-lifecycle event (not a device push):
 
