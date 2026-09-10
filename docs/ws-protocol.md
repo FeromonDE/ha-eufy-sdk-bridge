@@ -181,6 +181,17 @@ it; the SDK throws for a non-hub serial. The hub drops offline for a minute or t
 { "id": 7, "ok": false, "error": "…" }
 ```
 
+### `event.refresh`
+Force an immediate **"Last event" image** refresh for a device — pull the newest event cover from the
+HomeBase now and (if a genuinely newer image landed) broadcast `eventImageUpdated`. Backs a manual
+"Refresh Last Event" control; useful when the automatic on-detection refresh raced the HomeBase writing
+the crop. *(Requires auth.)*
+
+```jsonc
+// →  { "id": 8, "cmd": "event.refresh", "sn": "EXAMPLE-CAM-0001" }
+// ←  { "id": 8, "ok": true, "changed": true }   // changed=false when no newer image is available yet
+```
+
 ### `config.get` / `config.set`
 Read or change the **cloud poll interval** (`pollMs`, milliseconds) at runtime — how often the bridge
 re-reads device state from the cloud. `0` disables polling. Unset at startup → the SDK default

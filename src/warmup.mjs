@@ -14,6 +14,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // (auto-track fires many pushes) down to one refresh. Override with EVENT_IMAGE_REFRESH_DELAY_MS.
 const REFRESH_DELAY_MS = Number(process.env.EVENT_IMAGE_REFRESH_DELAY_MS) || 3000;
 
+// The HomeBase writes a new event's crop SECONDS after the motion push, and not on a fixed delay — a
+// single early query gets the previous cover ("unchanged") or a crop-less record, so "Last event"
+// advances its date but shows the previous image. So the local-cover refresh RETRIES on an escalating
+// schedule until a genuinely-new image lands (then nudges HA once and stops). ~60s of coverage total.
+const LOCAL_REFRESH_SCHEDULE = (
+  process.env.EVENT_IMAGE_REFRESH_SCHEDULE_MS || "3000,4000,6000,10000,15000,20000"
+)
+  .split(",")
+  .map((n) => Number(n.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
+
 export function createWarmup(ctx) {
   const { eufy, eventImageDir } = ctx;
   const { faceNames } = ctx.state;
@@ -371,28 +382,61 @@ export function createWarmup(ctx) {
     return false;
   }
 
-  // Debounce per device: a burst of pushes (auto-track fires many) collapses to one delayed refresh,
-  // which also gives the HomeBase time to write the new event's cover before we query for it.
-  const pendingRefresh = new Map(); // sn -> timer
+  /** Nudge HA to re-pull /event-image — the detection broadcast already fetched the (stale) image, so
+   *  without this HA would not update until its next poll. */
+  const nudge = (sn, changed) => {
+    if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
+  };
+
+  // In-flight guard per device: a burst of pushes (auto-track fires many) collapses to the one retry
+  // loop already running for that device.
+  const pendingRefresh = new Set(); // sn
   function onDetectionRefresh(sn) {
     if (!sn || pendingRefresh.has(sn)) return;
-    const nudge = (changed) => {
-      // Tell HA to re-pull /event-image now that the disk file advanced — the detection broadcast that
-      // triggered this already fired (and fetched the still-stale image), so without this nudge HA would
-      // not update until its next poll.
-      if (changed) ctx.broadcast?.({ event: "eventImageUpdated", deviceSn: sn });
-    };
-    const timer = setTimeout(() => {
-      pendingRefresh.delete(sn);
-      // Two independent sources, whichever applies to this device: the pushed cloud thumbnail (doorbell /
-      // cloud cams) and the on-HomeBase local cover (local-storage cams). They don't share the P2P DB
-      // lock, so run both; each nudges HA on its own when it lands a fresh image.
-      void refreshStoredSnapshotFor(sn).then(nudge);
-      void refreshLastEventImageFor(sn).then(nudge);
-    }, REFRESH_DELAY_MS);
-    timer.unref?.();
-    pendingRefresh.set(sn, timer);
+    pendingRefresh.add(sn);
+    // Pushed cloud thumbnail (doorbell / cloud cams): its own internal retry window; nudge if it lands.
+    void refreshStoredSnapshotFor(sn).then((changed) => nudge(sn, changed));
+    // On-HomeBase local cover (local-storage cams): RETRY across the escalating schedule until a fresh
+    // image lands — the HomeBase writes the new crop a few seconds after the push, so a single early
+    // query is exactly what leaves "Last event" one image behind. Stop at the first genuine change.
+    void (async () => {
+      try {
+        for (let i = 0; i < LOCAL_REFRESH_SCHEDULE.length; i++) {
+          await sleep(LOCAL_REFRESH_SCHEDULE[i]);
+          if (await refreshLastEventImageFor(sn)) {
+            nudge(sn, true);
+            return;
+          }
+        }
+      } finally {
+        pendingRefresh.delete(sn);
+      }
+    })();
   }
 
-  return { warmFaceRoster, warmLastEventImages, refreshLastEventImageFor, refreshStoredSnapshotFor, onDetectionRefresh };
+  /**
+   * Force an immediate "Last event" image refresh for a device, bypassing the debounce/retry schedule —
+   * runs both sources once, right now, and nudges HA if a fresh image lands. Backs the manual "Refresh
+   * Last Event" control, and answers whether the image actually changed so the caller can report it.
+   */
+  async function forceRefreshEventImage(sn) {
+    if (!sn) return false;
+    const [stored, local] = await Promise.all([
+      refreshStoredSnapshotFor(sn).catch(() => false),
+      refreshLastEventImageFor(sn).catch(() => false),
+    ]);
+    const changed = Boolean(stored || local);
+    nudge(sn, changed);
+    ctx.eventLog?.(`force refresh: ${sn} → ${changed ? "image updated" : "no newer image available yet"}`);
+    return changed;
+  }
+
+  return {
+    warmFaceRoster,
+    warmLastEventImages,
+    refreshLastEventImageFor,
+    refreshStoredSnapshotFor,
+    onDetectionRefresh,
+    forceRefreshEventImage,
+  };
 }

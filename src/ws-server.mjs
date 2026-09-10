@@ -68,6 +68,7 @@ export function createWsServer(ctx, httpServer) {
         case "device.set":
         case "device.action":
         case "device.reboot":
+        case "event.refresh":
         case "light.effects":
         case "config.get":
         case "config.set":
@@ -124,6 +125,12 @@ export function createWsServer(ctx, httpServer) {
           // HomeBase-only; SDK throws for a non-hub serial. The hub drops offline for a minute or two.
           await eufy.reboot(msg.sn);
           return reply({});
+        }
+        case "event.refresh": {
+          // Manual "Last event" image refresh (debug/force button): pull the newest cover NOW and nudge
+          // HA. Answers { changed } — true when a genuinely newer image landed.
+          const changed = ctx.forceRefreshEventImage ? await ctx.forceRefreshEventImage(msg.sn) : false;
+          return reply({ changed });
         }
         case "light.effects": {
           // The smart-light effect gallery (id + display name) for HA's effect_list. Cached; pass
