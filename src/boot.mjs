@@ -66,6 +66,17 @@ export function createBoot(ctx) {
       if (cfg.streamIdleMs) timers.streamIdle ??= setInterval(() => ctx.streamIdleTick(), 30_000);
       if (cfg.rtspIdleOffMs) timers.rtspIdle ??= setInterval(() => void ctx.rtspIdleSweep(), 60_000);
       console.log(`[bridge] ready — ${summaries.length} devices, ${cams.length} camera stream(s)`);
+      // One-line inventory per device (model + codec + capabilities) so a support log shows exactly
+      // what the bridge enumerated and how each device classified — e.g. why a light did/didn't get the
+      // `smart_light` capability HA needs to create a light entity.
+      for (const s of summaries) {
+        console.log(
+          `[bridge] device: ${s.sn} "${s.name ?? "?"}" model=${s.model ?? "?"}` +
+            `${s.modelName && s.modelName !== s.model ? ` (${s.modelName})` : ""}` +
+            ` codec=${s.codec ?? "?"} caps=[${(s.capabilities ?? []).join(",")}]` +
+            `${s.error ? ` ERROR=${s.error}` : ""}`,
+        );
+      }
       ctx.broadcast({ event: "ready", schemaVersion: SCHEMA_VERSION });
       // Both read the P2P DB via a shared `dbChunk` stream — run sequentially so their accumulators don't
       // cross-contaminate. Non-blocking so `ready` isn't held up.
