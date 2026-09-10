@@ -25,6 +25,13 @@ const LOCAL_REFRESH_SCHEDULE = (
   .map((n) => Number(n.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
 
+// The fast schedule above (~58s) often expires BEFORE the HomeBase overwrites the rolling cover with
+// the new frame — which is exactly why the manual "Refresh Last Event" button (pressed later) works
+// when the auto-refresh didn't. So after the fast ramp, keep polling at a steady interval up to a cap,
+// so the late write is caught automatically and the button becomes unnecessary. Env-tunable.
+const LOCAL_REFRESH_TAIL_MS = Number(process.env.EVENT_IMAGE_REFRESH_TAIL_MS) || 30000;
+const LOCAL_REFRESH_MAX_MS = Number(process.env.EVENT_IMAGE_REFRESH_MAX_MS) || 240000;
+
 export function createWarmup(ctx) {
   const { eufy, eventImageDir } = ctx;
   const { faceNames } = ctx.state;
@@ -401,13 +408,23 @@ export function createWarmup(ctx) {
     // query is exactly what leaves "Last event" one image behind. Stop at the first genuine change.
     void (async () => {
       try {
-        for (let i = 0; i < LOCAL_REFRESH_SCHEDULE.length; i++) {
-          await sleep(LOCAL_REFRESH_SCHEDULE[i]);
+        // Fast escalating ramp for the common case, then a steady tail up to LOCAL_REFRESH_MAX_MS so a
+        // late crop write is still caught without the user pressing "Refresh Last Event". Stop at the
+        // first genuine change.
+        let elapsed = 0;
+        for (let i = 0; elapsed < LOCAL_REFRESH_MAX_MS; i++) {
+          const delay = i < LOCAL_REFRESH_SCHEDULE.length ? LOCAL_REFRESH_SCHEDULE[i] : LOCAL_REFRESH_TAIL_MS;
+          await sleep(delay);
+          elapsed += delay;
           if (await refreshLastEventImageFor(sn)) {
             nudge(sn, true);
             return;
           }
         }
+        ctx.eventLog?.(
+          `local refresh: ${sn} — no fresh crop after ${Math.round(elapsed / 1000)}s; ` +
+            `will catch on the next detection (or press "Refresh Last Event")`,
+        );
       } finally {
         pendingRefresh.delete(sn);
       }
