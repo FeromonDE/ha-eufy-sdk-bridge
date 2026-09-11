@@ -94,10 +94,6 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `BRIDGE_PORT` | `3000` | WS/HTTP control port |
 | `EUFY_POLL_MS` | `600000` (10 min) | how often the bridge polls the cloud for device state; `0` disables. Also changeable live from the HA integration / the `config.set` WS command |
 | `EUFY_SESSION` | `/app/data/.eufy-session.json` | where the login token is persisted |
-| `SOLIX_EMAIL` | — (optional) | Anker **Solix** account email — enables Solix support (power stations / smart meter). A **separate** account from the eufy one; needs `SOLIX_PASSWORD` too |
-| `SOLIX_PASSWORD` | — | Solix account password (enables Solix together with `SOLIX_EMAIL`) |
-| `SOLIX_COUNTRY` | `EUFY_COUNTRY` | two-letter Solix account country |
-| `SOLIX_SESSION` | `/app/data/.solix-session.json` | where the Solix login token is persisted |
 | `GO2RTC_CONFIG` | `/app/data/go2rtc.yaml` | generated from the live device list at startup |
 | `STREAM_IDLE_MS` | `300000` (5 min) | auto-off a camera's live P2P feed after this long with no detection event, even if HA still holds the stream "open" — stops the radio to save battery; the next detection reopens it. `0` disables |
 | `RTSP_IDLE_OFF_MS` | `300000` (5 min) | battery-saver: turn a **battery** camera's native `rtspStream` publish OFF after this long idle (no detection, no active bridge stream), so a forgotten `rtspStream=ON` can't drain it. Wired cameras are never touched. `0` disables |
