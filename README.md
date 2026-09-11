@@ -52,6 +52,12 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 > build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh). A merge to the
 > `dev` branch publishes a rolling `:dev` tag for testing.
 
+## Contributing
+
+Contributions are welcome — please branch from **`dev`** and open your PR against **`dev`** (not
+`main`). See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch model, CI checks, and how releases
+are cut.
+
 ## Develop
 
 The bridge is ESM (no build step) and depends on the SDK as a normal npm package
