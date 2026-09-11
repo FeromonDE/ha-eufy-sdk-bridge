@@ -18,9 +18,7 @@ const REFRESH_DELAY_MS = Number(process.env.EVENT_IMAGE_REFRESH_DELAY_MS) || 300
 // single early query gets the previous cover ("unchanged") or a crop-less record, so "Last event"
 // advances its date but shows the previous image. So the local-cover refresh RETRIES on an escalating
 // schedule until a genuinely-new image lands (then nudges HA once and stops). ~60s of coverage total.
-const LOCAL_REFRESH_SCHEDULE = (
-  process.env.EVENT_IMAGE_REFRESH_SCHEDULE_MS || "3000,4000,6000,10000,15000,20000"
-)
+const LOCAL_REFRESH_SCHEDULE = (process.env.EVENT_IMAGE_REFRESH_SCHEDULE_MS || "3000,4000,6000,10000,15000,20000")
   .split(",")
   .map((n) => Number(n.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);

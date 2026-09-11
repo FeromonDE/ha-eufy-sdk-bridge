@@ -2,18 +2,11 @@
 #
 # Trigger: a published GitHub Release (the release tag names the version), or a manual run.
 # Output:  ghcr.io/mega-yfue/ha-eufy-sdk-bridge:<version> + :latest — one manifest carrying
-#          linux/amd64, linux/arm64 and linux/arm/v7 (the arches the add-on builds FROM).
+#          linux/amd64 + linux/arm64 (node:24-alpine has no arm/v7 base).
 #
-# This is the CI counterpart of scripts/publish-multiarch.sh; the Dockerfile already selects the
-# go2rtc binary by TARGETARCH, so no per-arch handling lives here.
-#
-# ── Required secret ───────────────────────────────────────────────────────────────────────────────
-# The bridge depends on the PRIVATE @mega-yfue/eufy-sdk (file:../eufy-sdk), supplied to the build as
-# the `sdk` named context — so CI must check that repo out. `GITHUB_TOKEN` cannot read another private
-# repo, so add a repo secret:
-#   SDK_REPO_TOKEN = a fine-grained PAT with `Contents: read` on mega-yfue/eufy-sdk
-#                    (or a classic PAT with `repo` scope).
-# Pushing to ghcr.io/mega-yfue/* uses the built-in GITHUB_TOKEN via `packages: write` below.
+# This is the CI counterpart of scripts/publish-multiarch.sh. The bridge pulls @mega-yfue/eufy-sdk from
+# the PUBLIC npm registry, so there is no SDK checkout / named build context — the built-in
+# GITHUB_TOKEN (packages: write) is the only credential needed.
 name: Publish image to GHCR
 
 on:
@@ -22,12 +15,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version tag (e.g. 0.1.36). Defaults to package.json."
+        description: "Image version tag (e.g. 0.2.0). Defaults to package.json."
         required: false
-      sdk_ref:
-        description: "eufy-sdk ref to build against."
-        required: false
-        default: beta-0.1.0
 
 permissions:
   contents: read
@@ -43,14 +32,6 @@ jobs:
       - name: Check out the bridge
         uses: actions/checkout@v4
 
-      - name: Check out eufy-sdk (private — supplies the build's `sdk` context)
-        uses: actions/checkout@v4
-        with:
-          repository: mega-yfue/eufy-sdk
-          ref: ${{ github.event.inputs.sdk_ref || 'beta-0.1.0' }}
-          token: ${{ secrets.SDK_REPO_TOKEN }}
-          path: eufy-sdk
-
       - name: Resolve version (release tag must match package.json)
         id: v
         run: |
@@ -61,7 +42,7 @@ jobs:
           else
             VER="$(node -p "require('./package.json').version")"
           fi
-          VER="${VER#v}"   # tolerate a leading v (v0.1.36 → 0.1.36)
+          VER="${VER#v}"   # tolerate a leading v (v0.2.0 → 0.2.0)
           PKG="$(node -p "require('./package.json').version")"
           if [ "$VER" != "$PKG" ]; then
             echo "::error::release/input version '$VER' does not match package.json '$PKG' — bump package.json to match before releasing"
@@ -70,7 +51,7 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Publishing $IMAGE:$VER (+ :latest)"
 
-      - name: Set up QEMU (arm emulation for the arm64/arm-v7 legs)
+      - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
@@ -87,14 +68,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-contexts: |
-            sdk=./eufy-sdk
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
             ${{ env.IMAGE }}:latest
-          # Speeds up re-runs; the arm legs build under emulation and are the slow part.
+          # Speeds up re-runs; the arm64 leg builds under emulation and is the slow part.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -103,7 +82,7 @@ jobs:
           {
             echo "### Published \`$IMAGE:${{ steps.v.outputs.version }}\`"
             echo ""
-            echo "Platforms: \`linux/amd64\`, \`linux/arm64\`, \`linux/arm/v7\` · also tagged \`:latest\`"
+            echo "Platforms: \`linux/amd64\`, \`linux/arm64\` · also tagged \`:latest\`"
             echo ""
             echo "Verify: \`docker buildx imagetools inspect $IMAGE:${{ steps.v.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
