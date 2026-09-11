@@ -33,7 +33,11 @@ export function createWsServer(ctx, httpServer) {
 
   async function handleMessage(ws, raw) {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { ok: false, error: "bad json" }); }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return send(ws, { ok: false, error: "bad json" });
+    }
     const { id, cmd } = msg;
     if (DEBUG) {
       const bits = [`cmd=${cmd}`];
@@ -80,8 +84,10 @@ export function createWsServer(ctx, httpServer) {
           return fail(`unknown cmd: ${cmd}`);
       }
       switch (cmd) {
-        case "devices.list": return reply({ devices: await ctx.deviceList() });
-        case "device.state": return reply({ device: await ctx.describeDevice(msg.sn) });
+        case "devices.list":
+          return reply({ devices: await ctx.deviceList() });
+        case "device.state":
+          return reply({ device: await ctx.describeDevice(msg.sn) });
         case "device.properties": {
           const dev = await eufy.getDevice(msg.sn);
           return reply({ sn: msg.sn, properties: ctx.propertySpecs(dev) });
@@ -93,7 +99,9 @@ export function createWsServer(ctx, httpServer) {
             await eufy.setProperty(msg.sn, msg.name, msg.value);
             dbg(`device.set OK sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms)`);
           } catch (e) {
-            console.error(`[bridge] device.set FAILED sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+            console.error(
+              `[bridge] device.set FAILED sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`,
+            );
             throw e; // outer catch surfaces it to the frontend (+ triggers session recovery if kicked)
           }
           return reply({});
@@ -117,7 +125,9 @@ export function createWsServer(ctx, httpServer) {
             dbg(`device.action OK ${action} sn=${msg.sn} (${Date.now() - t0}ms)`);
             return reply({ result: result ?? null });
           } catch (e) {
-            console.error(`[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`);
+            console.error(
+              `[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`,
+            );
             throw e;
           }
         }
@@ -167,9 +177,13 @@ export function createWsServer(ctx, httpServer) {
             http: `http://${cfg.selfHost}:${cfg.port}/stream/${msg.sn}`,
             rtsp: `rtsp://${cfg.selfHost}:8554/${msg.sn}`,
           });
-        case "stream.stop": return reply({}); // advisory; the media connection is the real signal
+        case "stream.stop":
+          return reply({}); // advisory; the media connection is the real signal
       }
-    } catch (e) { if (e?.name === "SessionExpiredError") ctx.maybeRecoverSession(); return fail(e); }
+    } catch (e) {
+      if (e?.name === "SessionExpiredError") ctx.maybeRecoverSession();
+      return fail(e);
+    }
   }
 
   return { send, broadcast, handleMessage };

@@ -8,21 +8,47 @@ const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
 
 /** The SDK event names broadcast to every connected WS client. */
 export const FORWARDED_EVENTS = [
-  "motion", "personDetected", "strangerDetected", "doorbellPress", "petDetection",
-  "packageDelivered", "packageTaken", "packageStranded", "soundDetected", "cryingDetected",
-  "vehicleDetected", "dogDetected", "armingModeChanged", "alarm", "lockState",
-  "contactState", "batteryLevel", "batteryAlert", "ptzNotify", "smartLightState",
+  "motion",
+  "personDetected",
+  "strangerDetected",
+  "doorbellPress",
+  "petDetection",
+  "packageDelivered",
+  "packageTaken",
+  "packageStranded",
+  "soundDetected",
+  "cryingDetected",
+  "vehicleDetected",
+  "dogDetected",
+  "armingModeChanged",
+  "alarm",
+  "lockState",
+  "contactState",
+  "batteryLevel",
+  "batteryAlert",
+  "ptzNotify",
+  "smartLightState",
 ];
 
 // The "something happened" pushes (not battery/arming/state changes) — these keep a camera's live
 // feed warm and reset the battery rtspStream idle clock (see stream-idle.mjs).
 export const DETECTION_EVENTS = new Set([
-  "motion", "personDetected", "strangerDetected", "petDetection", "vehicleDetected", "dogDetected",
-  "doorbellPress", "packageDelivered", "packageTaken", "packageStranded", "soundDetected", "cryingDetected",
+  "motion",
+  "personDetected",
+  "strangerDetected",
+  "petDetection",
+  "vehicleDetected",
+  "dogDetected",
+  "doorbellPress",
+  "packageDelivered",
+  "packageTaken",
+  "packageStranded",
+  "soundDetected",
+  "cryingDetected",
 ]);
 
-export const PUSH_STALL_MS = 5 * 60_000;   // push down (or never up) this long ⇒ events are dead ⇒ recover
-export const SUSPEND_RELEASE_MS = 30_000;  // no /stream pull this long while suspended ⇒ nobody's watching
+export const PUSH_STALL_MS = 5 * 60_000; // push down (or never up) this long ⇒ events are dead ⇒ recover
+export const SUSPEND_RELEASE_MS = 30_000; // no /stream pull this long while suspended ⇒ nobody's watching
 
 /**
  * Parse the environment into the config + derived constants. `dbg` is a no-op unless BRIDGE_DEBUG is on.

@@ -25,15 +25,15 @@ services:
     image: ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest
     container_name: eufy-bridge
     restart: unless-stopped
-    network_mode: host          # needed for go2rtc WebRTC (UDP/ICE)
+    network_mode: host # needed for go2rtc WebRTC (UDP/ICE)
     environment:
       EUFY_EMAIL: "you@example.com"
       EUFY_PASSWORD: "your-password"
-      EUFY_COUNTRY: "GB"         # your account's country code
-      BRIDGE_HOST: "0.0.0.0"     # bind all interfaces
-      BRIDGE_PORT: "3000"        # change the WS/control port here if 3000 is taken
+      EUFY_COUNTRY: "GB" # your account's country code
+      BRIDGE_HOST: "0.0.0.0" # bind all interfaces
+      BRIDGE_PORT: "3000" # change the WS/control port here if 3000 is taken
     volumes:
-      - /opt/homeassistant/eufy-bridge-data:/app/data   # persists the login token
+      - /opt/homeassistant/eufy-bridge-data:/app/data # persists the login token
 ```
 
 Start just the bridge:
@@ -85,23 +85,23 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 
 ## Configuration reference
 
-| Env var | Default | Meaning |
-| --- | --- | --- |
-| `EUFY_EMAIL` | — (required) | eufy account email |
-| `EUFY_PASSWORD` | — (required) | eufy account password |
-| `EUFY_COUNTRY` | `GB` | two-letter account country (routes the region) |
-| `BRIDGE_HOST` | `0.0.0.0` | interface the WS/HTTP binds to |
-| `BRIDGE_PORT` | `3000` | WS/HTTP control port |
-| `EUFY_POLL_MS` | `600000` (10 min) | how often the bridge polls the cloud for device state; `0` disables. Also changeable live from the HA integration / the `config.set` WS command |
-| `EUFY_SESSION` | `/app/data/.eufy-session.json` | where the login token is persisted |
-| `GO2RTC_CONFIG` | `/app/data/go2rtc.yaml` | generated from the live device list at startup |
-| `STREAM_IDLE_MS` | `300000` (5 min) | auto-off a camera's live P2P feed after this long with no detection event, even if HA still holds the stream "open" — stops the radio to save battery; the next detection reopens it. `0` disables |
-| `RTSP_IDLE_OFF_MS` | `300000` (5 min) | battery-saver: turn a **battery** camera's native `rtspStream` publish OFF after this long idle (no detection, no active bridge stream), so a forgotten `rtspStream=ON` can't drain it. Wired cameras are never touched. `0` disables |
-| `BRIDGE_DEBUG` | off | `1` logs each incoming WS command, control-command timing, and P2P connect/close/ack — enough to trace the frontend↔SDK flow |
-| `BRIDGE_DEBUG_P2P` | off | `1` additionally routes the SDK's raw per-frame transport logs (very noisy) |
-| `BRIDGE_EVENT_LOG` | **on** | prints a `[bridge:event]` line per push/semantic event: what it is, how many frontend clients it reached, and each "Last event" image fetch + result. Narrow (only real events), not the `BRIDGE_DEBUG` firehose. `0` silences |
-| `BRIDGE_SELF_HOST` | `127.0.0.1` | host go2rtc uses to pull `/stream/<sn>` back from the bridge |
-| `BRIDGE_PREWARM` | off | `1` = speculatively open a camera's P2P session on a high-intent event (doorbell/person/pet/package) so a following live view starts instantly. Off by default — it holds a battery camera's radio open ~28s per event |
+| Env var            | Default                        | Meaning                                                                                                                                                                                                                               |
+| ------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `EUFY_EMAIL`       | — (required)                   | eufy account email                                                                                                                                                                                                                    |
+| `EUFY_PASSWORD`    | — (required)                   | eufy account password                                                                                                                                                                                                                 |
+| `EUFY_COUNTRY`     | `GB`                           | two-letter account country (routes the region)                                                                                                                                                                                        |
+| `BRIDGE_HOST`      | `0.0.0.0`                      | interface the WS/HTTP binds to                                                                                                                                                                                                        |
+| `BRIDGE_PORT`      | `3000`                         | WS/HTTP control port                                                                                                                                                                                                                  |
+| `EUFY_POLL_MS`     | `600000` (10 min)              | how often the bridge polls the cloud for device state; `0` disables. Also changeable live from the HA integration / the `config.set` WS command                                                                                       |
+| `EUFY_SESSION`     | `/app/data/.eufy-session.json` | where the login token is persisted                                                                                                                                                                                                    |
+| `GO2RTC_CONFIG`    | `/app/data/go2rtc.yaml`        | generated from the live device list at startup                                                                                                                                                                                        |
+| `STREAM_IDLE_MS`   | `300000` (5 min)               | auto-off a camera's live P2P feed after this long with no detection event, even if HA still holds the stream "open" — stops the radio to save battery; the next detection reopens it. `0` disables                                    |
+| `RTSP_IDLE_OFF_MS` | `300000` (5 min)               | battery-saver: turn a **battery** camera's native `rtspStream` publish OFF after this long idle (no detection, no active bridge stream), so a forgotten `rtspStream=ON` can't drain it. Wired cameras are never touched. `0` disables |
+| `BRIDGE_DEBUG`     | off                            | `1` logs each incoming WS command, control-command timing, and P2P connect/close/ack — enough to trace the frontend↔SDK flow                                                                                                          |
+| `BRIDGE_DEBUG_P2P` | off                            | `1` additionally routes the SDK's raw per-frame transport logs (very noisy)                                                                                                                                                           |
+| `BRIDGE_EVENT_LOG` | **on**                         | prints a `[bridge:event]` line per push/semantic event: what it is, how many frontend clients it reached, and each "Last event" image fetch + result. Narrow (only real events), not the `BRIDGE_DEBUG` firehose. `0` silences        |
+| `BRIDGE_SELF_HOST` | `127.0.0.1`                    | host go2rtc uses to pull `/stream/<sn>` back from the bridge                                                                                                                                                                          |
+| `BRIDGE_PREWARM`   | off                            | `1` = speculatively open a camera's P2P session on a high-intent event (doorbell/person/pet/package) so a following live view starts instantly. Off by default — it holds a battery camera's radio open ~28s per event                |
 
 ---
 

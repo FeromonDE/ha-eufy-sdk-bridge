@@ -12,8 +12,8 @@ HTTP  :3000/snapshot/<sn>  a JPEG still
 HTTP  :3000/healthz        which cameras are streaming
 ```
 
-Video is deliberately **not** on the WebSocket: the WS hands back a URL, and *connecting to that URL
-is what starts the camera — disconnecting is what stops it*. There is no "stream is running" flag to
+Video is deliberately **not** on the WebSocket: the WS hands back a URL, and _connecting to that URL
+is what starts the camera — disconnecting is what stops it_. There is no "stream is running" flag to
 drift out of sync.
 
 ## Run it
@@ -34,12 +34,12 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 
 ## Where it fits
 
-| Repo | Role |
-| --- | --- |
-| [`eufy-sdk`](https://github.com/mega-yfue/eufy-sdk) | the HA-agnostic library |
-| **`ha-eufy-sdk-bridge`** | **this** — WS + HTTP + go2rtc daemon (Docker) |
-| [`ha-eufy-sdk-addon`](https://github.com/mega-yfue/ha-eufy-sdk-addon) | Home Assistant add-on wrapper |
-| [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk) | the HACS integration (front door) |
+| Repo                                                                  | Role                                          |
+| --------------------------------------------------------------------- | --------------------------------------------- |
+| [`eufy-sdk`](https://github.com/mega-yfue/eufy-sdk)                   | the HA-agnostic library                       |
+| **`ha-eufy-sdk-bridge`**                                              | **this** — WS + HTTP + go2rtc daemon (Docker) |
+| [`ha-eufy-sdk-addon`](https://github.com/mega-yfue/ha-eufy-sdk-addon) | Home Assistant add-on wrapper                 |
+| [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk)             | the HACS integration (front door)             |
 
 > Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
 > streaming. Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64` ·

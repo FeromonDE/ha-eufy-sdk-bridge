@@ -27,16 +27,28 @@ export function createStreamIdle(ctx) {
     if (!cfg.rtspIdleOffMs || !flags.ready || flags.recovering) return;
     const now = Date.now();
     let devices;
-    try { devices = await ctx.deviceList(); } catch { return; }
+    try {
+      devices = await ctx.deviceList();
+    } catch {
+      return;
+    }
     for (const d of devices) {
       const sn = d.sn;
       if (!(d.capabilities ?? []).includes("battery")) continue; // battery cameras only
-      if (d.state?.rtspStream !== true) continue;                 // only if currently publishing
-      if (activeStreams.has(sn)) { rtspLastActive.set(sn, now); continue; } // being streamed = active
+      if (d.state?.rtspStream !== true) continue; // only if currently publishing
+      if (activeStreams.has(sn)) {
+        rtspLastActive.set(sn, now);
+        continue;
+      } // being streamed = active
       const lastSeen = rtspLastActive.get(sn);
-      if (lastSeen === undefined) { rtspLastActive.set(sn, now); continue; } // give a full window from first sight
+      if (lastSeen === undefined) {
+        rtspLastActive.set(sn, now);
+        continue;
+      } // give a full window from first sight
       if (now - lastSeen < cfg.rtspIdleOffMs) continue;
-      console.log(`[bridge] ${sn} battery + rtspStream idle ${Math.round((now - lastSeen) / 1000)}s — turning rtspStream OFF (battery-save)`);
+      console.log(
+        `[bridge] ${sn} battery + rtspStream idle ${Math.round((now - lastSeen) / 1000)}s — turning rtspStream OFF (battery-save)`,
+      );
       try {
         await eufy.setProperty(sn, "rtspStream", false);
         rtspLastActive.set(sn, now); // reset so we don't re-fire before the state refreshes

@@ -10,7 +10,9 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "lint": "prettier --check .",
+    "format": "prettier --write ."
   },
   "engines": {
     "node": ">=24.0.0"
@@ -18,5 +20,8 @@
   "dependencies": {
     "@mega-yfue/eufy-sdk": "0.1.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
   }
 }
