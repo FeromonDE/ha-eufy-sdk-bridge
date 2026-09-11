@@ -1,11 +1,12 @@
 # Publish the :dev image to GHCR on every merge/push to the `dev` branch.
 #
-# Trigger: a push to `dev` (i.e. a PR merged into dev) — or a manual run. Output:
+# Trigger: a push to `dev` (a PR merged into it) — or a manual run. Output:
 #   ghcr.io/mega-yfue/ha-eufy-sdk-bridge:dev  (a rolling tag for the development line).
 #
-# The bridge pulls @mega-yfue/eufy-sdk from the public npm registry (no build context / no SDK
-# checkout), so this just builds the Dockerfile as-is. Multi-arch amd64 + arm64 (node:24-alpine has
-# no arm/v7 base). Pushing to ghcr.io/mega-yfue/* uses the built-in GITHUB_TOKEN via packages: write.
+# The bridge pulls @mega-yfue/eufy-sdk from public npm (no build context / SDK checkout). Uses the
+# docker CLI in shell rather than the docker/* marketplace actions — the org's Actions policy allows
+# only actions owned by mega-yfue or created by GitHub, so actions/checkout is fine but docker/* is not.
+# buildx is preinstalled; arm64 emulation via a tonistiigi/binfmt image pull; push via GITHUB_TOKEN.
 name: Publish :dev image to GHCR
 
 on:
@@ -25,30 +26,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Enable arm64 emulation (binfmt)
+        run: docker run --rm --privileged tonistiigi/binfmt --install arm64
+      - name: Create a buildx builder
+        run: docker buildx create --use --name eufy-ci --driver docker-container
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build and push :dev
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.IMAGE }}:dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag "$IMAGE:dev" \
+            --push \
+            .
       - name: Summary
         run: |
           {
             echo "### Published \`$IMAGE:dev\`"
             echo ""
             echo "Rolling dev tag · platforms \`linux/amd64\`, \`linux/arm64\`."
-            echo "Verify: \`docker buildx imagetools inspect $IMAGE:dev\`"
           } >> "$GITHUB_STEP_SUMMARY"
