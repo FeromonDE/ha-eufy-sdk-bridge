@@ -61,17 +61,6 @@ export function createWsServer(ctx, httpServer) {
           await ctx.applyLogin(await eufy.login());
           return reply({ auth: ctx.authStatus() });
 
-        // ── Anker Solix (independent of eufy auth — its own account) ──
-        case "solix.status":
-          return reply({ solix: ctx.solixStatus?.() ?? { enabled: false, state: "disabled", deviceCount: 0 } });
-        case "solix.devices":
-          return reply({ devices: ctx.solixDeviceList?.() ?? [] });
-        case "solix.submitCode": {
-          if (!ctx.solixSubmitCode) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          await ctx.solixSubmitCode(msg.code); // NB: the 2FA code (msg.code) is never logged
-          return reply({ solix: ctx.solixStatus() });
-        }
-
         // ── device control (require auth) ──
         case "devices.list":
         case "device.state":

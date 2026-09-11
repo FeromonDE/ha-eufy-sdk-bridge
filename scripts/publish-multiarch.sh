@@ -23,14 +23,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE="ghcr.io/mega-yfue/ha-eufy-sdk-bridge"
-SDK_DIR="${SDK_DIR:-../eufy-sdk}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64,linux/arm/v7}"
 VERSION="${1:-$(node -p "require('./package.json').version")}"
 
-if [ ! -f "${SDK_DIR}/package.json" ]; then
-  echo "error: SDK checkout not found at ${SDK_DIR} (set SDK_DIR=… to point at it)" >&2
-  exit 1
-fi
+# The SDK is a public npm package (@mega-yfue/eufy-sdk, pinned in package.json), pulled by `npm ci`
+# inside the build — no sibling checkout or named build context needed.
 
 # A dedicated builder so the host's default (often the docker driver, which can't do multi-platform)
 # is left untouched. Reuse it across runs.
@@ -42,7 +39,6 @@ echo "Building ${IMAGE}:${VERSION} (+ :latest) for ${PLATFORMS}"
 docker buildx build \
   --builder eufy-multiarch \
   --platform "${PLATFORMS}" \
-  --build-context "sdk=${SDK_DIR}" \
   --tag "${IMAGE}:${VERSION}" \
   --tag "${IMAGE}:latest" \
   --push \

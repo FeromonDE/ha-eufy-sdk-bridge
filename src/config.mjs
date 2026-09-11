@@ -55,18 +55,6 @@ export function loadConfig(env = process.env) {
     // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to enable the SDK's
     // default pre-warm events.
     prewarm: truthy(env.BRIDGE_PREWARM),
-    // Optional Anker Solix support — a SEPARATE Anker account (its own login + device backend), enabled
-    // only when both SOLIX_EMAIL and SOLIX_PASSWORD are set. Independent of the eufy client; its own
-    // persisted session file. Country falls back to the eufy country.
-    solix:
-      env.SOLIX_EMAIL && env.SOLIX_PASSWORD
-        ? {
-            email: env.SOLIX_EMAIL,
-            password: env.SOLIX_PASSWORD,
-            country: env.SOLIX_COUNTRY || env.EUFY_COUNTRY || "GB",
-            session: env.SOLIX_SESSION || "./data/.solix-session.json",
-          }
-        : undefined,
   };
 
   const DEBUG = truthy(env.BRIDGE_DEBUG);

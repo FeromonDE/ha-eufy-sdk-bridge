@@ -22,7 +22,6 @@ import { createStreamIdle } from "./src/stream-idle.mjs";
 import { createWatchdog } from "./src/watchdog.mjs";
 import { createAuth } from "./src/auth.mjs";
 import { createBoot } from "./src/boot.mjs";
-import { createSolix } from "./src/solix.mjs";
 import { createHttpHandler } from "./src/http-routes.mjs";
 import { createWsServer } from "./src/ws-server.mjs";
 import { closeStreamClients } from "./streams.mjs";
@@ -55,7 +54,6 @@ Object.assign(
   createWatchdog(ctx),
   createAuth(ctx),
   createBoot(ctx),
-  createSolix(ctx),
 );
 
 const httpServer = http.createServer(createHttpHandler(ctx));
@@ -86,10 +84,6 @@ async function main() {
   }
   if (state.flags.ready) console.log("[bridge] logged in from a stored session");
   else console.log(`[bridge] auth required: ${ctx.authStatus().state} — drive it over WS /ws (auth.status / auth.submit)`);
-
-  // Anker Solix is a separate account on a separate backend, so start it independently of the eufy
-  // login above — its outcome never gates eufy devices. No-op unless SOLIX_* is configured.
-  if (cfg.solix) void ctx.startSolix?.();
 }
 
 async function shutdown() {
@@ -99,7 +93,6 @@ async function shutdown() {
   if (timers.rtspIdle) clearInterval(timers.rtspIdle);
   flags.go2rtcProc?.kill();
   await closeStreamClients();
-  await ctx.stopSolix?.();
   await eufy.disconnect?.();
   process.exit(0);
 }
