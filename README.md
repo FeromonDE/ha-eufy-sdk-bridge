@@ -49,4 +49,21 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 > streaming. Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64` ·
 > `arm/v7`). **Publishing a GitHub Release** builds and pushes the versioned + `:latest` tags
 > automatically ([`.github/workflows/publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml)); the same
-> build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh).
+> build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh). A merge to the
+> `dev` branch publishes a rolling `:dev` tag for testing.
+
+## Develop
+
+The bridge is ESM (no build step) and depends on the SDK as a normal npm package
+([`@mega-yfue/eufy-sdk`](https://www.npmjs.com/package/@mega-yfue/eufy-sdk)) — `npm install` pulls it
+from the registry, no sibling checkout needed.
+
+```bash
+npm install
+npm test          # node --test
+npm run lint      # prettier --check .   (npm run format to fix)
+```
+
+Every PR into `main` or `dev` runs the CI gate ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
+`npm ci` → lint → compile (`node --check` on each `.mjs`) → test. `main` is the public release line;
+`dev` is the development line (rolling `:dev` image).
