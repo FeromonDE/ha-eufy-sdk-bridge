@@ -1,5 +1,9 @@
 # ha-eufy-sdk-bridge
 
+[![CI](https://github.com/mega-yfue/ha-eufy-sdk-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mega-yfue/ha-eufy-sdk-bridge/actions/workflows/ci.yml)
+[![node](https://img.shields.io/badge/node-%E2%89%A524-brightgreen?logo=nodedotjs&logoColor=white)](./package.json)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
+
 The host-facing daemon: one process that logs into eufy **once** and exposes the
 [`eufy-sdk`](https://github.com/mega-yfue/eufy-sdk) to a frontend — Home Assistant, a web UI,
 anything. Ships as a multi-arch Docker image with [go2rtc](https://github.com/AlexxIT/go2rtc)
