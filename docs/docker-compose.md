@@ -93,7 +93,8 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `BRIDGE_HOST` | `0.0.0.0` | interface the WS/HTTP binds to |
 | `BRIDGE_PORT` | `3000` | WS/HTTP control port |
 | `EUFY_POLL_MS` | `600000` (10 min) | how often the bridge polls the cloud for device state; `0` disables. Also changeable live from the HA integration / the `config.set` WS command |
-| `EUFY_SESSION` | `/app/data/.eufy-session.json` | where the login token is persisted |
+| `EUFY_SESSION` | `/app/data/.eufy-session.json` | where the login token is persisted (the FCM push registration is persisted beside it as `.eufy-fcm.json`, so restarts reconnect instead of re-registering) |
+| `BRIDGE_OPENUDID` | — (derived from email) | distinct per-install device identity. Leave unset for a single bridge. Set a **unique** value per bridge if you run more than one on the same account — otherwise they share an identity and displace each other's session / split push delivery |
 | `SOLIX_EMAIL` | — (optional) | Anker **Solix** account email — enables Solix support (power stations / smart meter). A **separate** account from the eufy one; needs `SOLIX_PASSWORD` too |
 | `SOLIX_PASSWORD` | — | Solix account password (enables Solix together with `SOLIX_EMAIL`) |
 | `SOLIX_COUNTRY` | `EUFY_COUNTRY` | two-letter Solix account country |

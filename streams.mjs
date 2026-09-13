@@ -24,6 +24,7 @@ export async function streamClientFor(sn, cfg) {
     password: cfg.password,
     countryCode: cfg.country,
     store: new FileSessionStore(cfg.session), // shared session file → hydrate, no fresh login
+    openudid: cfg.openudid, // same identity as the control client (matches the shared session)
   });
   client.on("error", (e) => console.error(`[bridge] stream(${sn}) sdk error: ${e?.message ?? e}`));
   const result = await client.login();

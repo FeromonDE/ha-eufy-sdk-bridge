@@ -37,6 +37,11 @@ export function loadConfig(env = process.env) {
     host: env.BRIDGE_HOST || "0.0.0.0",
     port: Number(env.BRIDGE_PORT || 3000),
     session: env.EUFY_SESSION || "./data/.eufy-session.json",
+    // Distinct per-install device identity. Unset → the SDK derives one from the account email, which is
+    // STABLE but IDENTICAL for every client on the account — so a second client (a second bridge, or the
+    // phone app under some conditions) presents the same identity and the two displace each other's
+    // session / split push delivery. Set a unique value per bridge when you run more than one on an account.
+    openudid: env.BRIDGE_OPENUDID || undefined,
     go2rtcConfig: env.GO2RTC_CONFIG || "./go2rtc.yaml",
     selfHost: env.BRIDGE_SELF_HOST || "127.0.0.1",
     // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). Changeable live via the
@@ -68,6 +73,10 @@ export function loadConfig(env = process.env) {
           }
         : undefined,
   };
+  // Where the FCM push registration (token + seen-ids) is persisted, beside the session file. Without a
+  // pushStore the SDK falls back to MemoryFcmStore and re-registers a fresh token on every restart —
+  // wasted work, and it's what makes a same-identity collision bite rather than self-correct (issue #30).
+  cfg.pushSession = path.join(path.dirname(cfg.session), ".eufy-fcm.json");
 
   const DEBUG = truthy(env.BRIDGE_DEBUG);
   const DEBUG_P2P = truthy(env.BRIDGE_DEBUG_P2P);
