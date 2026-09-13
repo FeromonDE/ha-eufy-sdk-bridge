@@ -23,6 +23,7 @@ export const DETECTION_EVENTS = new Set([
 
 export const PUSH_STALL_MS = 5 * 60_000;   // push down (or never up) this long ⇒ events are dead ⇒ recover
 export const SUSPEND_RELEASE_MS = 30_000;  // no /stream pull this long while suspended ⇒ nobody's watching
+export const STREAM_FAIL_BACKOFF_MAX_MS = 5 * 60_000; // cap on the exponential backoff after failed opens
 
 /**
  * Parse the environment into the config + derived constants. `dbg` is a no-op unless BRIDGE_DEBUG is on.
@@ -55,6 +56,13 @@ export function loadConfig(env = process.env) {
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
     rtspIdleOffMs: env.RTSP_IDLE_OFF_MS != null ? Number(env.RTSP_IDLE_OFF_MS) : 300_000,
+    // Battery-saver: when a /stream open FAILS (P2P connect timeout, no p2p_did, connection closed), go2rtc's
+    // ffmpeg source keeps retrying into /stream every ~30s — and each retry opens a fresh P2P session,
+    // waking the camera radio for nothing on a camera that can't connect. After a failure, refuse reopening
+    // for this base window (doubling per consecutive failure, capped at STREAM_FAIL_BACKOFF_MAX_MS) so a
+    // hammering consumer gets a fast 503 instead of a radio wake. Cleared on a successful open or a
+    // detection. Default 30s (≈ one ffmpeg retry cycle); 0 disables.
+    streamFailBackoffMs: env.STREAM_FAIL_BACKOFF_MS != null ? Number(env.STREAM_FAIL_BACKOFF_MS) : 30_000,
     // Event pre-warm: the SDK can speculatively open a camera's P2P session on a high-intent event
     // (doorbell/person/pet/package) so a following live view starts instantly. OFF by default here — it
     // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to enable the SDK's
@@ -106,5 +114,6 @@ export function loadConfig(env = process.env) {
     DETECTION_EVENTS,
     PUSH_STALL_MS,
     SUSPEND_RELEASE_MS,
+    STREAM_FAIL_BACKOFF_MAX_MS,
   };
 }

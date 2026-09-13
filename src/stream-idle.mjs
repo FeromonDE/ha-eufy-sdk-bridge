@@ -6,17 +6,50 @@
 // publishes continuously and flattens the battery even when nobody consumes it.
 
 export function createStreamIdle(ctx) {
-  const { cfg, eufy, SUSPEND_RELEASE_MS } = ctx;
+  const { cfg, eufy, SUSPEND_RELEASE_MS, STREAM_FAIL_BACKOFF_MAX_MS } = ctx;
   const { flags } = ctx.state;
-  const { lastDetect, activeStreams, idleSuspended, lastPullAttempt, rtspLastActive } = ctx.state;
+  const { lastDetect, activeStreams, idleSuspended, lastPullAttempt, rtspLastActive, streamBackoff } = ctx.state;
 
-  /** Record a detection and lift any idle-suspension so the stream may reopen on the next go2rtc pull. */
+  /** Record a detection and lift any idle-suspension / failure-backoff so the stream may reopen at once. */
   function noteDetection(sn) {
     if (!sn) return;
     const now = Date.now();
     lastDetect.set(sn, now);
     rtspLastActive.set(sn, now); // a detection counts as activity for the battery rtspStream auto-off
     if (idleSuspended.delete(sn)) console.log(`[bridge] stream(${sn}) idle-suspension lifted by detection`);
+    streamBackoff.delete(sn); // a live detection means the camera is reachable — let the next pull try
+  }
+
+  /**
+   * Remaining failure-backoff (ms) for a camera whose recent /stream open failed, else 0. go2rtc's ffmpeg
+   * source retries a failed stream every ~30s, and each open wakes the P2P radio — so on a camera that
+   * can't connect (P2P timeout, no p2p_did), the idle-suspension guard never engages (the feed never
+   * becomes "active") and every retry drains the battery. This backs the reopen off instead, so a
+   * hammering consumer gets a fast 503 without a radio wake. 0 (or `streamFailBackoffMs=0`) = no backoff.
+   */
+  function streamBackoffMs(sn) {
+    if (!cfg.streamFailBackoffMs) return 0;
+    const b = streamBackoff.get(sn);
+    if (!b) return 0;
+    const remaining = b.until - Date.now();
+    // Window elapsed → allow one attempt, but KEEP the entry so its streak keeps doubling if the next
+    // open fails again. It's cleared for good by a successful open or a detection (noteStreamOpened /
+    // noteDetection), so a camera that recovers doesn't carry stale backoff.
+    return remaining > 0 ? remaining : 0;
+  }
+
+  /** Record a failed /stream open and arm exponential backoff (base doubles per streak, capped). */
+  function noteStreamFailure(sn) {
+    if (!sn || !cfg.streamFailBackoffMs) return;
+    const streak = (streamBackoff.get(sn)?.streak ?? 0) + 1;
+    const window = Math.min(cfg.streamFailBackoffMs * 2 ** (streak - 1), STREAM_FAIL_BACKOFF_MAX_MS);
+    streamBackoff.set(sn, { until: Date.now() + window, streak });
+    console.log(`[bridge] stream(${sn}) open failed (#${streak}) — backing off reopen ${Math.round(window / 1000)}s (P2P unreachable)`);
+  }
+
+  /** A stream opened successfully → the camera is reachable, clear any failure backoff. */
+  function noteStreamOpened(sn) {
+    if (sn) streamBackoff.delete(sn);
   }
 
   /**
@@ -72,5 +105,5 @@ export function createStreamIdle(ctx) {
     }
   }
 
-  return { noteDetection, streamIdleTick, rtspIdleSweep };
+  return { noteDetection, streamIdleTick, rtspIdleSweep, streamBackoffMs, noteStreamFailure, noteStreamOpened };
 }
