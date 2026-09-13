@@ -103,11 +103,17 @@ export function createHttpHandler(ctx) {
       // retries into this until a detection or the consumer giving up lifts it (see streamIdleTick).
       if (cfg.streamIdleMs && idleSuspended.has(sn))
         return json(res, 503, { error: "stream idle-suspended — no recent detection, waiting for motion or a fresh viewer" });
+      // Failure-backoff: a recent open failed (P2P unreachable), and go2rtc retries every ~30s. Serve a
+      // fast 503 without opening a P2P session, so a camera that can't connect isn't woken on every retry.
+      const backoff = ctx.streamBackoffMs?.(sn) ?? 0;
+      if (backoff > 0)
+        return json(res, 503, { error: `stream backing off after a failed open — retry in ${Math.ceil(backoff / 1000)}s (P2P unreachable)` });
       try {
         const client = await streamClientFor(sn, cfg); // its OWN P2P session — see streams.mjs
         const cam = (await client.getDevice(sn)).camera?.();
         if (!cam?.openReadable) return json(res, 404, { error: "no live video on this device" });
         const feed = await cam.openReadable(); // node Readable of Annex-B
+        ctx.noteStreamOpened?.(sn); // reachable again → clear any failure backoff
         if (!streaming.has(sn)) ctx.broadcast({ event: "streamState", deviceSn: sn, active: true });
         streaming.add(sn);
         activeStreams.set(sn, { feed, startedAt: Date.now() });
@@ -125,6 +131,7 @@ export function createHttpHandler(ctx) {
         feed.on("close", cleanup);
         return;
       } catch (e) {
+        ctx.noteStreamFailure?.(sn); // arm backoff so the next go2rtc retry doesn't wake the radio again
         return json(res, 502, { error: String(e?.message ?? e) });
       }
     }
