@@ -4,7 +4,7 @@
 // account's Solix devices as capability-driven SolixDevice objects, opens the shared SecureMqtt
 // telemetry stream, and forwards devices + live readings to WS clients (events `solixReady` /
 // `solixReading` / `solixAuth`; queried via `solix.devices` / `solix.status`).
-import { SolixClient, FileSolixSessionStore, SolixMqtt } from "@mega-yfue/eufy-sdk";
+import { SolixClient, FileSessionStore, SolixMqtt, discoverSolixDevices } from "@mega-yfue/eufy-sdk";
 
 export function createSolix(ctx) {
   const { cfg } = ctx;
@@ -16,7 +16,7 @@ export function createSolix(ctx) {
     email: s.email,
     password: s.password,
     countryCode: s.country,
-    store: new FileSolixSessionStore(s.session),
+    store: new FileSessionStore(s.session),
   });
 
   /** A WS-facing summary of one Solix device: identity + capabilities + the latest telemetry values. */
@@ -45,7 +45,9 @@ export function createSolix(ctx) {
 
   /** After a successful login: discover devices, open the telemetry stream, forward readings. */
   async function attach() {
-    const devices = await st.client.discoverDevices();
+    // discoverDevices moved off the wire client into the model layer (transport ⊥ model): the client is
+    // now wire-only, and discoverSolixDevices composes its reads into capability-driven SolixDevice models.
+    const devices = await discoverSolixDevices(st.client);
     st.devices = new Map(devices.map((d) => [d.serial, d]));
     st.status = "ready";
     console.log(`[bridge] solix ready — ${devices.length} device(s): ${devices.map((d) => `${d.productCode}/${d.serial}`).join(", ") || "none"}`);
