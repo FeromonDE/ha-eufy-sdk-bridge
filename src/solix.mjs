@@ -4,7 +4,7 @@
 // account's Solix devices as capability-driven SolixDevice objects, opens the shared SecureMqtt
 // telemetry stream, and forwards devices + live readings to WS clients (events `solixReady` /
 // `solixReading` / `solixAuth`; queried via `solix.devices` / `solix.status`).
-import { SolixClient, FileSolixSessionStore, SolixMqtt, discoverSolixDevices } from "@mega-yfue/eufy-sdk";
+import { SolixClient, FileSessionStore, SolixMqtt, discoverSolixDevices } from "@mega-yfue/eufy-sdk";
 
 export function createSolix(ctx) {
   const { cfg } = ctx;
@@ -16,7 +16,7 @@ export function createSolix(ctx) {
     email: s.email,
     password: s.password,
     countryCode: s.country,
-    store: new FileSolixSessionStore(s.session),
+    store: new FileSessionStore(s.session),
   });
 
   /** A WS-facing summary of one Solix device: identity + capabilities + the latest telemetry values. */
