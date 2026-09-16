@@ -99,6 +99,20 @@ export function createWsServer(ctx, httpServer) {
           await ctx.solixSetScreenOffTime(msg.deviceSn, msg.seconds);
           return reply({ deviceSn: msg.deviceSn, seconds: Number(msg.seconds) });
         }
+        case "solix.getPowerCutoff": {
+          // Read the battery discharge-cutoff (minimum-SOC) preset options.
+          if (!ctx.solixGetPowerCutoff) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn) return fail("solix.getPowerCutoff needs { deviceSn, siteId? }");
+          const options = await ctx.solixGetPowerCutoff(msg.deviceSn, msg.siteId);
+          return reply({ deviceSn: msg.deviceSn, options });
+        }
+        case "solix.setPowerCutoff": {
+          // Select a discharge-cutoff preset by id (id comes from getPowerCutoff).
+          if (!ctx.solixSetPowerCutoff) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn || msg.cutoffDataId == null) return fail("solix.setPowerCutoff needs { deviceSn, cutoffDataId }");
+          await ctx.solixSetPowerCutoff(msg.deviceSn, msg.cutoffDataId);
+          return reply({ deviceSn: msg.deviceSn, cutoffDataId: Number(msg.cutoffDataId) });
+        }
 
         // ── device control (require auth) ──
         case "devices.list":

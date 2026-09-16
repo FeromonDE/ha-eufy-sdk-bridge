@@ -132,6 +132,28 @@ export function createSolix(ctx) {
     if (!st.client) throw new Error("solix not connected");
     await st.client.setScreenOffTime(deviceSn, Number(seconds));
   }
+  /** Read the Solarbank battery discharge-cutoff (minimum-SOC) preset options. */
+  async function solixGetPowerCutoff(deviceSn, siteId) {
+    if (!st.client) throw new Error("solix not connected");
+    return st.client.getPowerCutoff(deviceSn, siteId || "");
+  }
+  /** Select the Solarbank discharge-cutoff preset by option id (from getPowerCutoff). */
+  async function solixSetPowerCutoff(deviceSn, cutoffDataId) {
+    if (!st.client) throw new Error("solix not connected");
+    await st.client.setPowerCutoff(deviceSn, Number(cutoffDataId));
+  }
 
-  return { startSolix, solixSubmitCode, solixDeviceList, solixStatus, stopSolix, solixSetAmbientLight, solixSetDeviceAttrs, solixGetDeviceAttrs, solixSetScreenOffTime };
+  return {
+    startSolix,
+    solixSubmitCode,
+    solixDeviceList,
+    solixStatus,
+    stopSolix,
+    solixSetAmbientLight,
+    solixSetDeviceAttrs,
+    solixGetDeviceAttrs,
+    solixSetScreenOffTime,
+    solixGetPowerCutoff,
+    solixSetPowerCutoff,
+  };
 }
