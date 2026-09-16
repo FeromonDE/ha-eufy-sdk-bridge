@@ -75,6 +75,25 @@ export function createSolix(ctx) {
     }
   }
 
+  // Self-heal a failed login WITHOUT hammering: Anker throttles repeated logins (26161 "too
+  // frequent") and can escalate to a captcha requirement, so retry gently on a long, escalating
+  // backoff instead of tight-looping (or having the user manually restart, which re-arms the
+  // throttle). Cleared on success and on shutdown.
+  let solixRetryTimer = null;
+  let solixRetryMs = 0;
+  const SOLIX_RETRY_BASE_MS = 15 * 60 * 1000; // 15 min — comfortably past the login throttle window
+  const SOLIX_RETRY_MAX_MS = 60 * 60 * 1000; // cap backoff at 1 h
+  function scheduleSolixRetry() {
+    if (solixRetryTimer) return;
+    solixRetryMs = solixRetryMs ? Math.min(solixRetryMs * 2, SOLIX_RETRY_MAX_MS) : SOLIX_RETRY_BASE_MS;
+    console.log(`[bridge] solix: will retry login in ~${Math.round(solixRetryMs / 60000)} min`);
+    solixRetryTimer = setTimeout(() => {
+      solixRetryTimer = null;
+      void startSolix();
+    }, solixRetryMs);
+    solixRetryTimer.unref?.(); // never keep the process alive just to retry
+  }
+
   /** Log in (independent of eufy). Surfaces 2FA over WS; a stored session makes this a no-op re-login. */
   async function startSolix() {
     if (st.status === "ready" || st.status === "connecting") return;
@@ -89,10 +108,12 @@ export function createSolix(ctx) {
         return;
       }
       await attach();
+      solixRetryMs = 0; // a clean login resets the backoff
     } catch (e) {
       st.status = "error";
       console.error(`[bridge] solix start failed: ${e?.message ?? e}`);
       ctx.broadcast({ event: "solixAuth", state: "error", error: String(e?.message ?? e) });
+      scheduleSolixRetry();
     }
   }
 
@@ -106,6 +127,10 @@ export function createSolix(ctx) {
 
   /** Stop the telemetry stream (shutdown). */
   async function stopSolix() {
+    if (solixRetryTimer) {
+      clearTimeout(solixRetryTimer);
+      solixRetryTimer = null;
+    }
     try {
       await st.mqtt?.close?.();
     } catch {
