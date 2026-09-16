@@ -71,6 +71,20 @@ export function createWsServer(ctx, httpServer) {
           await ctx.solixSubmitCode(msg.code); // NB: the 2FA code (msg.code) is never logged
           return reply({ solix: ctx.solixStatus() });
         }
+        case "solix.setLight": {
+          // Toggle a Solarbank's ambient light (encrypted+signed set_device_attrs write).
+          if (!ctx.solixSetAmbientLight) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn) return fail("solix.setLight needs { deviceSn, on }");
+          await ctx.solixSetAmbientLight(msg.deviceSn, !!msg.on);
+          return reply({ deviceSn: msg.deviceSn, on: !!msg.on });
+        }
+        case "solix.setDeviceAttrs": {
+          // Generic Solix attribute write (snake_case keys), for future controls.
+          if (!ctx.solixSetDeviceAttrs) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn) return fail("solix.setDeviceAttrs needs { deviceSn, attributes }");
+          await ctx.solixSetDeviceAttrs(msg.deviceSn, msg.attributes);
+          return reply({ deviceSn: msg.deviceSn });
+        }
 
         // ── device control (require auth) ──
         case "devices.list":

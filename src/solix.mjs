@@ -113,5 +113,15 @@ export function createSolix(ctx) {
     }
   }
 
-  return { startSolix, solixSubmitCode, solixDeviceList, solixStatus, stopSolix };
+  /** Control a Solix device attribute (encrypted+signed write), e.g. the Solarbank ambient light. */
+  async function solixSetAmbientLight(deviceSn, on) {
+    if (!st.client) throw new Error("solix not connected");
+    await st.client.setAmbientLight(deviceSn, !!on);
+  }
+  async function solixSetDeviceAttrs(deviceSn, attributes) {
+    if (!st.client) throw new Error("solix not connected");
+    await st.client.setDeviceAttrs(deviceSn, attributes || {});
+  }
+
+  return { startSolix, solixSubmitCode, solixDeviceList, solixStatus, stopSolix, solixSetAmbientLight, solixSetDeviceAttrs };
 }
