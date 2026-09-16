@@ -122,6 +122,16 @@ export function createSolix(ctx) {
     if (!st.client) throw new Error("solix not connected");
     await st.client.setDeviceAttrs(deviceSn, attributes || {});
   }
+  /** Read device attributes (e.g. the display `screen_off_time`) — a plain authed read. */
+  async function solixGetDeviceAttrs(deviceSn, keys) {
+    if (!st.client) throw new Error("solix not connected");
+    return st.client.getDeviceAttrs(deviceSn, Array.isArray(keys) ? keys : []);
+  }
+  /** Set the Solarbank display screen-off timeout, in seconds (`screen_off_time`). */
+  async function solixSetScreenOffTime(deviceSn, seconds) {
+    if (!st.client) throw new Error("solix not connected");
+    await st.client.setScreenOffTime(deviceSn, Number(seconds));
+  }
 
-  return { startSolix, solixSubmitCode, solixDeviceList, solixStatus, stopSolix, solixSetAmbientLight, solixSetDeviceAttrs };
+  return { startSolix, solixSubmitCode, solixDeviceList, solixStatus, stopSolix, solixSetAmbientLight, solixSetDeviceAttrs, solixGetDeviceAttrs, solixSetScreenOffTime };
 }

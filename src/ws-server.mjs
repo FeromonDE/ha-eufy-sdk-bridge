@@ -85,6 +85,20 @@ export function createWsServer(ctx, httpServer) {
           await ctx.solixSetDeviceAttrs(msg.deviceSn, msg.attributes);
           return reply({ deviceSn: msg.deviceSn });
         }
+        case "solix.getDeviceAttrs": {
+          // Read device attributes (e.g. screen_off_time) — plain authed read.
+          if (!ctx.solixGetDeviceAttrs) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn) return fail("solix.getDeviceAttrs needs { deviceSn, keys? }");
+          const attributes = await ctx.solixGetDeviceAttrs(msg.deviceSn, msg.keys);
+          return reply({ deviceSn: msg.deviceSn, attributes });
+        }
+        case "solix.setScreenOffTime": {
+          // Set the Solarbank display screen-off timeout (seconds); "Never" is a device sentinel.
+          if (!ctx.solixSetScreenOffTime) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn || msg.seconds == null) return fail("solix.setScreenOffTime needs { deviceSn, seconds }");
+          await ctx.solixSetScreenOffTime(msg.deviceSn, msg.seconds);
+          return reply({ deviceSn: msg.deviceSn, seconds: Number(msg.seconds) });
+        }
 
         // ── device control (require auth) ──
         case "devices.list":
