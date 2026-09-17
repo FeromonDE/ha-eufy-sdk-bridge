@@ -55,7 +55,10 @@ export function createSolix(ctx) {
 
     // Live telemetry over the shared AWS-IoT broker (same transport the eufy path uses).
     try {
-      const mqtt = new SolixMqtt({ mqttInfo: await st.client.getUserMqttInfo() });
+      // Arm faster than the SDK's 25s default so state changes made outside HA (the app, the
+      // physical button) show up in the realtime frame — and thus on the switches/sensors — within
+      // ~12s instead of ~25s. The device only pushes `param_info` while a client keeps requesting it.
+      const mqtt = new SolixMqtt({ mqttInfo: await st.client.getUserMqttInfo(), armIntervalMs: 12_000 });
       st.mqtt = mqtt;
       mqtt.on("error", (e) => console.error(`[bridge] solix mqtt: ${e?.message ?? e}`));
       mqtt.on("reading", (r) => {
