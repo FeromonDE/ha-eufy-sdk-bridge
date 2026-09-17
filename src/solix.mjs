@@ -69,6 +69,12 @@ export function createSolix(ctx) {
       mqtt.on("error", (e) => console.error(`[bridge] solix mqtt: ${e?.message ?? e}`));
       mqtt.on("reading", (r) => {
         st.devices.get(r.deviceSn)?.applyReading(r);
+        // App-side control changes (ambient light / display timeout) arrive as a command on the device
+        // /req channel that the SDK turns into a reading carrying just that key. Log them so an app
+        // toggle can be confirmed end-to-end (they're rare — only on a change, not every telemetry frame).
+        if ("ambientLightOn" in r.values || "displayTimeoutIndex" in r.values) {
+          console.log(`[bridge] solix app control: sn=${r.deviceSn} ${JSON.stringify(r.values)}`);
+        }
         ctx.broadcast({ event: "solixReading", deviceSn: r.deviceSn, productCode: r.productCode, values: r.values });
       });
       for (const d of devices) {
