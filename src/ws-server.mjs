@@ -120,6 +120,25 @@ export function createWsServer(ctx, httpServer) {
           await ctx.solixSetDisplayTimeout(msg.deviceSn, msg.index);
           return reply({ deviceSn: msg.deviceSn, index: Number(msg.index) });
         }
+        case "solix.getSocParams": {
+          // Read the Solarbank battery SOC-limit block (discharge/charge limit, backup reserve).
+          if (!ctx.solixGetSocParams) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn) return fail("solix.getSocParams needs { deviceSn }");
+          const params = await ctx.solixGetSocParams(msg.deviceSn);
+          return reply({ deviceSn: msg.deviceSn, params });
+        }
+        case "solix.setSocLimits": {
+          // Write the discharge and/or charge limit (whole-percent). Read-modify-write preserves the rest.
+          if (!ctx.solixSetSocLimits) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn || (msg.dischargeLowerLimit == null && msg.chargeUpperLimit == null)) {
+            return fail("solix.setSocLimits needs { deviceSn, dischargeLowerLimit? and/or chargeUpperLimit? }");
+          }
+          const changes = {};
+          if (msg.dischargeLowerLimit != null) changes.dischargeLowerLimit = Number(msg.dischargeLowerLimit);
+          if (msg.chargeUpperLimit != null) changes.chargeUpperLimit = Number(msg.chargeUpperLimit);
+          const merged = await ctx.solixSetSocLimits(msg.deviceSn, changes);
+          return reply({ deviceSn: msg.deviceSn, params: merged });
+        }
 
         // ── device control (require auth) ──
         case "devices.list":

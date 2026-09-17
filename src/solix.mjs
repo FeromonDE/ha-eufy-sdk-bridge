@@ -233,6 +233,47 @@ export function createSolix(ctx) {
     await st.mqtt.setDisplayTimeout(dev.record, Number(index));
   }
 
+  // The SOC-limit settings are keyed by SITE, not device — resolve a device's site by finding the site
+  // whose member list contains it. Cached after the first lookup (a device never changes sites in a run).
+  const siteIdCache = new Map();
+  async function siteIdForDevice(deviceSn) {
+    if (siteIdCache.has(deviceSn)) return siteIdCache.get(deviceSn);
+    const sites = await st.client.getSites();
+    for (const site of sites) {
+      const members = site?.site_device_list ?? [];
+      if (members.some((m) => m?.device_sn === deviceSn)) {
+        siteIdCache.set(deviceSn, site.site_id);
+        return site.site_id;
+      }
+    }
+    // Single-site accounts: fall back to the only site rather than failing the control.
+    if (sites.length === 1 && sites[0]?.site_id) {
+      siteIdCache.set(deviceSn, sites[0].site_id);
+      return sites[0].site_id;
+    }
+    throw new Error(`no site found for solix device ${deviceSn}`);
+  }
+
+  /** Read the Solarbank's battery SOC-limit settings (discharge/charge limit, backup reserve). */
+  async function solixGetSocParams(deviceSn) {
+    if (!st.client) throw new Error("solix not connected");
+    return st.client.getSafetySocParams(await siteIdForDevice(deviceSn));
+  }
+
+  /**
+   * Write the Solarbank's discharge and/or charge limit (whole-percent). Read-modify-write in the SDK
+   * preserves the fields not passed. Broadcasts the new limits on the reading path immediately so HA
+   * reflects the change without waiting for the device's `b5` telemetry to echo it back (~≤12s).
+   */
+  async function solixSetSocLimits(deviceSn, changes) {
+    if (!st.client) throw new Error("solix not connected");
+    const merged = await st.client.setSafetySocParams(await siteIdForDevice(deviceSn), changes);
+    const values = { dischargeLimit: merged.dischargeLowerLimit, chargeLimit: merged.chargeUpperLimit };
+    st.devices.get(deviceSn)?.applyReading({ deviceSn, values });
+    ctx.broadcast({ event: "solixReading", deviceSn, productCode: st.devices.get(deviceSn)?.productCode, values });
+    return merged;
+  }
+
   return {
     startSolix,
     solixSubmitCode,
@@ -246,5 +287,7 @@ export function createSolix(ctx) {
     solixGetPowerCutoff,
     solixSetPowerCutoff,
     solixSetDisplayTimeout,
+    solixGetSocParams,
+    solixSetSocLimits,
   };
 }
