@@ -167,6 +167,13 @@ export function createSolix(ctx) {
     if (!st.client) throw new Error("solix not connected");
     await st.client.setPowerCutoff(deviceSn, Number(cutoffDataId));
   }
+  /** Set the Solarbank display screen-off timeout by 1-based index (10s=1…30m=6) — MQTT command. */
+  async function solixSetDisplayTimeout(deviceSn, index) {
+    if (!st.mqtt) throw new Error("solix telemetry (MQTT) not connected");
+    const dev = st.devices.get(deviceSn);
+    if (!dev) throw new Error(`unknown solix device ${deviceSn}`);
+    await st.mqtt.setDisplayTimeout(dev.record, Number(index));
+  }
 
   return {
     startSolix,
@@ -180,5 +187,6 @@ export function createSolix(ctx) {
     solixSetScreenOffTime,
     solixGetPowerCutoff,
     solixSetPowerCutoff,
+    solixSetDisplayTimeout,
   };
 }

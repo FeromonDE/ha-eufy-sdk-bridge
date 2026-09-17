@@ -113,6 +113,13 @@ export function createWsServer(ctx, httpServer) {
           await ctx.solixSetPowerCutoff(msg.deviceSn, msg.cutoffDataId);
           return reply({ deviceSn: msg.deviceSn, cutoffDataId: Number(msg.cutoffDataId) });
         }
+        case "solix.setDisplayTimeout": {
+          // Set the Solarbank display screen-off timeout by 1-based index (10s=1…30m=6) — MQTT command.
+          if (!ctx.solixSetDisplayTimeout) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!msg.deviceSn || msg.index == null) return fail("solix.setDisplayTimeout needs { deviceSn, index }");
+          await ctx.solixSetDisplayTimeout(msg.deviceSn, msg.index);
+          return reply({ deviceSn: msg.deviceSn, index: Number(msg.index) });
+        }
 
         // ── device control (require auth) ──
         case "devices.list":
