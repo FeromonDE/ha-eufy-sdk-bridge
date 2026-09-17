@@ -4,7 +4,13 @@
 // account's Solix devices as capability-driven SolixDevice objects, opens the shared SecureMqtt
 // telemetry stream, and forwards devices + live readings to WS clients (events `solixReady` /
 // `solixReading` / `solixAuth`; queried via `solix.devices` / `solix.status`).
-import { SolixClient, FileSessionStore, SolixMqtt, discoverSolixDevices } from "@mega-yfue/eufy-sdk";
+import {
+  SolixClient,
+  FileSessionStore,
+  SolixMqtt,
+  discoverSolixDevices,
+  solarbankSceneReadings,
+} from "@mega-yfue/eufy-sdk";
 
 export function createSolix(ctx) {
   const { cfg } = ctx;
@@ -76,6 +82,45 @@ export function createSolix(ctx) {
       // Reads still work without the live stream — don't fail the whole Solix path on an MQTT hiccup.
       console.error(`[bridge] solix telemetry unavailable: ${e?.message ?? e}`);
     }
+
+    // Low-rate scene BACKSTOP for Solarbank batteries. The realtime ff09 push is the fast source
+    // (power/SOC every ~5-12s) but it does NOT reliably carry battery TEMPERATURE — the fast frame's
+    // BMS blob is empty, so the decoder withholds it. So poll the site "scene" snapshot (the app's own
+    // dashboard read) at a slow cadence and merge just the gap fields (batteryTemperature + a SOC
+    // cross-check) onto the SAME reading path (applyReading + solixReading). This is additive, never a
+    // replacement for the push. Runs independently of MQTT (a plain authed read), and only when a
+    // battery device is present.
+    startScenePoll(devices);
+  }
+
+  // The scene backstop poll (see attach): timer + the routine that fetches and forwards readings.
+  let scenePollTimer = null;
+  const SCENE_POLL_MS = 90_000; // slow — this fills gap fields, the MQTT push carries realtime
+  async function pollScene() {
+    try {
+      const sites = await st.client.getSites();
+      for (const site of sites) {
+        const siteId = site?.site_id;
+        if (!siteId) continue;
+        const scene = await st.client.getSiteScene(siteId);
+        for (const r of solarbankSceneReadings(scene)) {
+          const dev = st.devices.get(r.deviceSn);
+          if (!dev) continue;
+          dev.applyReading(r);
+          ctx.broadcast({ event: "solixReading", deviceSn: r.deviceSn, productCode: dev.productCode, values: r.values });
+        }
+      }
+    } catch (e) {
+      console.error(`[bridge] solix scene poll: ${e?.message ?? e}`);
+    }
+  }
+  function startScenePoll(devices) {
+    if (scenePollTimer) return; // already running (re-attach after 2FA)
+    const hasBattery = devices.some((d) => d.capabilities?.includes("battery"));
+    if (!hasBattery) return; // scene backstop only matters for a Solarbank/battery
+    void pollScene(); // seed immediately so temperature isn't blank until the first interval
+    scenePollTimer = setInterval(() => void pollScene(), SCENE_POLL_MS);
+    scenePollTimer.unref?.(); // never keep the process alive just to poll
   }
 
   // Self-heal a failed login WITHOUT hammering: Anker throttles repeated logins (26161 "too
@@ -133,6 +178,10 @@ export function createSolix(ctx) {
     if (solixRetryTimer) {
       clearTimeout(solixRetryTimer);
       solixRetryTimer = null;
+    }
+    if (scenePollTimer) {
+      clearInterval(scenePollTimer);
+      scenePollTimer = null;
     }
     try {
       await st.mqtt?.close?.();
