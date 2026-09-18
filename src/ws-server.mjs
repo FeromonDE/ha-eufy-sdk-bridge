@@ -5,6 +5,112 @@
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
 
+// Shown when a Solix command is used but Solix isn't configured (its ctx.* handler is absent).
+const SOLIX_DISABLED = "solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)";
+
+// ── Anker Solix control commands ──────────────────────────────────────────────────────────────────
+// Every Solix control has the same shape: require that Solix is enabled (its `ctx.*` handler exists) and
+// that the request names a target device, then call the handler and echo a small confirmation. Declaring
+// them in one table keeps that boilerplate out of the dispatch switch — a new control is one entry here,
+// not another copy-pasted case with the same two guard lines. Per entry:
+//   fn    — the ctx.* handler method name (its presence IS the "Solix enabled" test)
+//   needs — usage hint shown (as `<cmd> needs <needs>`) when the request is missing a required field
+//   req   — extra required msg fields beyond deviceSn (rejected when `== null`); optional
+//   check — optional extra predicate over msg (false ⇒ rejected with `needs`)
+//   run   — (fn, msg) => the handler call; its resolved value is passed to `out`
+//   out   — (msg, result) => the reply body
+const SOLIX_CONTROLS = {
+  "solix.setLight": {
+    // Toggle a Solarbank's ambient light (encrypted+signed set_device_attrs write).
+    fn: "solixSetAmbientLight",
+    needs: "{ deviceSn, on }",
+    run: (fn, m) => fn(m.deviceSn, !!m.on),
+    out: (m) => ({ deviceSn: m.deviceSn, on: !!m.on }),
+  },
+  "solix.setDeviceAttrs": {
+    // Generic Solix attribute write (snake_case keys), for future controls.
+    fn: "solixSetDeviceAttrs",
+    needs: "{ deviceSn, attributes }",
+    run: (fn, m) => fn(m.deviceSn, m.attributes),
+    out: (m) => ({ deviceSn: m.deviceSn }),
+  },
+  "solix.getDeviceAttrs": {
+    // Read device attributes (e.g. screen_off_time) — plain authed read.
+    fn: "solixGetDeviceAttrs",
+    needs: "{ deviceSn, keys? }",
+    run: (fn, m) => fn(m.deviceSn, m.keys),
+    out: (m, attributes) => ({ deviceSn: m.deviceSn, attributes }),
+  },
+  "solix.setScreenOffTime": {
+    // Set the Solarbank display screen-off timeout (seconds); "Never" is a device sentinel.
+    fn: "solixSetScreenOffTime",
+    needs: "{ deviceSn, seconds }",
+    req: ["seconds"],
+    run: (fn, m) => fn(m.deviceSn, m.seconds),
+    out: (m) => ({ deviceSn: m.deviceSn, seconds: Number(m.seconds) }),
+  },
+  "solix.getPowerCutoff": {
+    // Read the battery discharge-cutoff (minimum-SOC) preset options.
+    fn: "solixGetPowerCutoff",
+    needs: "{ deviceSn, siteId? }",
+    run: (fn, m) => fn(m.deviceSn, m.siteId),
+    out: (m, options) => ({ deviceSn: m.deviceSn, options }),
+  },
+  "solix.setPowerCutoff": {
+    // Select a discharge-cutoff preset by id (id comes from getPowerCutoff).
+    fn: "solixSetPowerCutoff",
+    needs: "{ deviceSn, cutoffDataId }",
+    req: ["cutoffDataId"],
+    run: (fn, m) => fn(m.deviceSn, m.cutoffDataId),
+    out: (m) => ({ deviceSn: m.deviceSn, cutoffDataId: Number(m.cutoffDataId) }),
+  },
+  "solix.setDisplayTimeout": {
+    // Set the Solarbank display screen-off timeout by 1-based index (10s=1…30m=6) — MQTT command.
+    fn: "solixSetDisplayTimeout",
+    needs: "{ deviceSn, index }",
+    req: ["index"],
+    run: (fn, m) => fn(m.deviceSn, m.index),
+    out: (m) => ({ deviceSn: m.deviceSn, index: Number(m.index) }),
+  },
+  "solix.getSocParams": {
+    // Read the Solarbank battery SOC-limit block (discharge/charge limit, backup reserve).
+    fn: "solixGetSocParams",
+    needs: "{ deviceSn }",
+    run: (fn, m) => fn(m.deviceSn),
+    out: (m, params) => ({ deviceSn: m.deviceSn, params }),
+  },
+  "solix.setSocLimits": {
+    // Write the discharge and/or charge limit (whole-percent). Read-modify-write preserves the rest.
+    fn: "solixSetSocLimits",
+    needs: "{ deviceSn, dischargeLowerLimit? and/or chargeUpperLimit? }",
+    check: (m) => m.dischargeLowerLimit != null || m.chargeUpperLimit != null,
+    run: (fn, m) => {
+      const changes = {};
+      if (m.dischargeLowerLimit != null) changes.dischargeLowerLimit = Number(m.dischargeLowerLimit);
+      if (m.chargeUpperLimit != null) changes.chargeUpperLimit = Number(m.chargeUpperLimit);
+      return fn(m.deviceSn, changes);
+    },
+    out: (m, params) => ({ deviceSn: m.deviceSn, params }),
+  },
+};
+
+// Commands that require an authenticated eufy session — gated in one place before dispatch. (auth.* and
+// solix.* run before this gate, so a client can drive 2FA/captcha and Solix while eufy is still pending.)
+const AUTHED_COMMANDS = new Set([
+  "devices.list",
+  "device.state",
+  "device.properties",
+  "device.set",
+  "device.action",
+  "device.reboot",
+  "event.refresh",
+  "light.effects",
+  "config.get",
+  "config.set",
+  "stream.start",
+  "stream.stop",
+]);
+
 export function createWsServer(ctx, httpServer) {
   const { cfg, eufy, SCHEMA_VERSION, DEBUG, dbg } = ctx;
   const { flags, clients } = ctx.state;
@@ -44,7 +150,26 @@ export function createWsServer(ctx, httpServer) {
     }
     const reply = (extra) => send(ws, { id, ok: true, ...extra });
     const fail = (error) => send(ws, { id, ok: false, error: String(error?.message ?? error) });
+    // Reject a bad request by throwing — the outer catch renders it as { ok:false, error }, the same
+    // client-visible result as `return fail(...)`, so the shared guards below don't thread a return.
+    const reject = (message) => { throw new Error(message); };
     try {
+      // Anker Solix control commands (table above) all share the same enable + target-device guards, so
+      // dispatch them here instead of repeating those two lines in ~10 near-identical switch cases.
+      const control = SOLIX_CONTROLS[cmd];
+      if (control) {
+        const fn = ctx[control.fn] ?? reject(SOLIX_DISABLED);
+        if (!msg.deviceSn) reject(`${cmd} needs ${control.needs}`);
+        for (const field of control.req ?? []) if (msg[field] == null) reject(`${cmd} needs ${control.needs}`);
+        if (control.check && !control.check(msg)) reject(`${cmd} needs ${control.needs}`);
+        return reply(control.out(msg, await control.run(fn, msg)));
+      }
+
+      // Everything else that isn't auth/Solix-status needs an authenticated eufy session.
+      if (AUTHED_COMMANDS.has(cmd) && !flags.ready) {
+        return fail("not authenticated — query auth.status and complete 2FA/captcha first");
+      }
+
       switch (cmd) {
         // ── auth ──
         case "auth.status":
@@ -61,104 +186,18 @@ export function createWsServer(ctx, httpServer) {
           await ctx.applyLogin(await eufy.login());
           return reply({ auth: ctx.authStatus() });
 
-        // ── Anker Solix (independent of eufy auth — its own account) ──
+        // ── Anker Solix status / challenge (not device controls — no target device / graceful when off) ──
         case "solix.status":
           return reply({ solix: ctx.solixStatus?.() ?? { enabled: false, state: "disabled", deviceCount: 0 } });
         case "solix.devices":
           return reply({ devices: ctx.solixDeviceList?.() ?? [] });
         case "solix.submitCode": {
-          if (!ctx.solixSubmitCode) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!ctx.solixSubmitCode) return fail(SOLIX_DISABLED);
           await ctx.solixSubmitCode(msg.code); // NB: the 2FA code (msg.code) is never logged
           return reply({ solix: ctx.solixStatus() });
         }
-        case "solix.setLight": {
-          // Toggle a Solarbank's ambient light (encrypted+signed set_device_attrs write).
-          if (!ctx.solixSetAmbientLight) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn) return fail("solix.setLight needs { deviceSn, on }");
-          await ctx.solixSetAmbientLight(msg.deviceSn, !!msg.on);
-          return reply({ deviceSn: msg.deviceSn, on: !!msg.on });
-        }
-        case "solix.setDeviceAttrs": {
-          // Generic Solix attribute write (snake_case keys), for future controls.
-          if (!ctx.solixSetDeviceAttrs) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn) return fail("solix.setDeviceAttrs needs { deviceSn, attributes }");
-          await ctx.solixSetDeviceAttrs(msg.deviceSn, msg.attributes);
-          return reply({ deviceSn: msg.deviceSn });
-        }
-        case "solix.getDeviceAttrs": {
-          // Read device attributes (e.g. screen_off_time) — plain authed read.
-          if (!ctx.solixGetDeviceAttrs) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn) return fail("solix.getDeviceAttrs needs { deviceSn, keys? }");
-          const attributes = await ctx.solixGetDeviceAttrs(msg.deviceSn, msg.keys);
-          return reply({ deviceSn: msg.deviceSn, attributes });
-        }
-        case "solix.setScreenOffTime": {
-          // Set the Solarbank display screen-off timeout (seconds); "Never" is a device sentinel.
-          if (!ctx.solixSetScreenOffTime) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn || msg.seconds == null) return fail("solix.setScreenOffTime needs { deviceSn, seconds }");
-          await ctx.solixSetScreenOffTime(msg.deviceSn, msg.seconds);
-          return reply({ deviceSn: msg.deviceSn, seconds: Number(msg.seconds) });
-        }
-        case "solix.getPowerCutoff": {
-          // Read the battery discharge-cutoff (minimum-SOC) preset options.
-          if (!ctx.solixGetPowerCutoff) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn) return fail("solix.getPowerCutoff needs { deviceSn, siteId? }");
-          const options = await ctx.solixGetPowerCutoff(msg.deviceSn, msg.siteId);
-          return reply({ deviceSn: msg.deviceSn, options });
-        }
-        case "solix.setPowerCutoff": {
-          // Select a discharge-cutoff preset by id (id comes from getPowerCutoff).
-          if (!ctx.solixSetPowerCutoff) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn || msg.cutoffDataId == null) return fail("solix.setPowerCutoff needs { deviceSn, cutoffDataId }");
-          await ctx.solixSetPowerCutoff(msg.deviceSn, msg.cutoffDataId);
-          return reply({ deviceSn: msg.deviceSn, cutoffDataId: Number(msg.cutoffDataId) });
-        }
-        case "solix.setDisplayTimeout": {
-          // Set the Solarbank display screen-off timeout by 1-based index (10s=1…30m=6) — MQTT command.
-          if (!ctx.solixSetDisplayTimeout) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn || msg.index == null) return fail("solix.setDisplayTimeout needs { deviceSn, index }");
-          await ctx.solixSetDisplayTimeout(msg.deviceSn, msg.index);
-          return reply({ deviceSn: msg.deviceSn, index: Number(msg.index) });
-        }
-        case "solix.getSocParams": {
-          // Read the Solarbank battery SOC-limit block (discharge/charge limit, backup reserve).
-          if (!ctx.solixGetSocParams) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn) return fail("solix.getSocParams needs { deviceSn }");
-          const params = await ctx.solixGetSocParams(msg.deviceSn);
-          return reply({ deviceSn: msg.deviceSn, params });
-        }
-        case "solix.setSocLimits": {
-          // Write the discharge and/or charge limit (whole-percent). Read-modify-write preserves the rest.
-          if (!ctx.solixSetSocLimits) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
-          if (!msg.deviceSn || (msg.dischargeLowerLimit == null && msg.chargeUpperLimit == null)) {
-            return fail("solix.setSocLimits needs { deviceSn, dischargeLowerLimit? and/or chargeUpperLimit? }");
-          }
-          const changes = {};
-          if (msg.dischargeLowerLimit != null) changes.dischargeLowerLimit = Number(msg.dischargeLowerLimit);
-          if (msg.chargeUpperLimit != null) changes.chargeUpperLimit = Number(msg.chargeUpperLimit);
-          const merged = await ctx.solixSetSocLimits(msg.deviceSn, changes);
-          return reply({ deviceSn: msg.deviceSn, params: merged });
-        }
 
-        // ── device control (require auth) ──
-        case "devices.list":
-        case "device.state":
-        case "device.properties":
-        case "device.set":
-        case "device.action":
-        case "device.reboot":
-        case "event.refresh":
-        case "light.effects":
-        case "config.get":
-        case "config.set":
-        case "stream.start":
-        case "stream.stop":
-          if (!flags.ready) return fail("not authenticated — query auth.status and complete 2FA/captcha first");
-          break;
-        default:
-          return fail(`unknown cmd: ${cmd}`);
-      }
-      switch (cmd) {
+        // ── device control (require auth — gated above) ──
         case "devices.list": return reply({ devices: await ctx.deviceList() });
         case "device.state": return reply({ device: await ctx.describeDevice(msg.sn) });
         case "device.properties": {
@@ -228,7 +267,6 @@ export function createWsServer(ctx, httpServer) {
           }
           return reply({ effects: effectsCache });
         }
-
         case "config.get":
           // Current effective cloud poll interval (ms). 0 means polling is disabled.
           return reply({ pollMs: eufy.pollIntervalMs });
@@ -247,6 +285,9 @@ export function createWsServer(ctx, httpServer) {
             rtsp: `rtsp://${cfg.selfHost}:8554/${msg.sn}`,
           });
         case "stream.stop": return reply({}); // advisory; the media connection is the real signal
+
+        default:
+          return fail(`unknown cmd: ${cmd}`);
       }
     } catch (e) { if (e?.name === "SessionExpiredError") ctx.maybeRecoverSession(); return fail(e); }
   }
