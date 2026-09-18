@@ -78,6 +78,16 @@ export function loadConfig(env = process.env) {
             password: env.SOLIX_PASSWORD,
             country: env.SOLIX_COUNTRY || env.EUFY_COUNTRY || "GB",
             session: env.SOLIX_SESSION || "./data/.solix-session.json",
+            // Cadence of the scene backstop poll — the slow authed read that fills the gap fields
+            // (battery temperature + a SOC cross-check) the MQTT push doesn't carry. Deliberately slow:
+            // Anker throttles frequent reads, and realtime already comes from the push. Default 90s.
+            scenePollMs: Number(env.SOLIX_SCENE_POLL_MS) || 90_000,
+            // Login self-heal backoff: after a failed login the bridge retries on an escalating delay
+            // (doubling from base, capped at max) rather than tight-looping — Anker throttles frequent
+            // logins ("too frequent") and can escalate to a captcha. Base 15 min (past the throttle
+            // window), cap 1 h. Raise if you still see throttling; there is rarely a reason to lower.
+            retryBaseMs: Number(env.SOLIX_RETRY_BASE_MS) || 15 * 60 * 1000,
+            retryMaxMs: Number(env.SOLIX_RETRY_MAX_MS) || 60 * 60 * 1000,
           }
         : undefined,
   };

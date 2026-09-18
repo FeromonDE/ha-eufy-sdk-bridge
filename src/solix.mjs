@@ -101,7 +101,7 @@ export function createSolix(ctx) {
 
   // The scene backstop poll (see attach): timer + the routine that fetches and forwards readings.
   let scenePollTimer = null;
-  const SCENE_POLL_MS = 90_000; // slow — this fills gap fields, the MQTT push carries realtime
+  const SCENE_POLL_MS = s.scenePollMs; // slow — fills gap fields; MQTT push carries realtime (SOLIX_SCENE_POLL_MS)
   async function pollScene() {
     try {
       const sites = await st.client.getSites();
@@ -135,8 +135,8 @@ export function createSolix(ctx) {
   // throttle). Cleared on success and on shutdown.
   let solixRetryTimer = null;
   let solixRetryMs = 0;
-  const SOLIX_RETRY_BASE_MS = 15 * 60 * 1000; // 15 min — comfortably past the login throttle window
-  const SOLIX_RETRY_MAX_MS = 60 * 60 * 1000; // cap backoff at 1 h
+  const SOLIX_RETRY_BASE_MS = s.retryBaseMs; // 15 min default — past the login throttle window (SOLIX_RETRY_BASE_MS)
+  const SOLIX_RETRY_MAX_MS = s.retryMaxMs; // cap the escalating backoff, default 1 h (SOLIX_RETRY_MAX_MS)
   function scheduleSolixRetry() {
     if (solixRetryTimer) return;
     solixRetryMs = solixRetryMs ? Math.min(solixRetryMs * 2, SOLIX_RETRY_MAX_MS) : SOLIX_RETRY_BASE_MS;

@@ -99,6 +99,9 @@ Point the integration at this host's IP and `BRIDGE_PORT`.
 | `SOLIX_PASSWORD` | — | Solix account password (enables Solix together with `SOLIX_EMAIL`) |
 | `SOLIX_COUNTRY` | `EUFY_COUNTRY` | two-letter Solix account country |
 | `SOLIX_SESSION` | `/app/data/.solix-session.json` | where the Solix login token is persisted |
+| `SOLIX_SCENE_POLL_MS` | `90000` (90 s) | how often the Solix scene backstop poll runs — the slow authed read that fills the gap fields (battery temperature + a SOC cross-check) the realtime MQTT push doesn't carry. Kept slow on purpose: Anker throttles frequent reads |
+| `SOLIX_RETRY_BASE_MS` | `900000` (15 min) | starting delay for the Solix login self-heal backoff after a failed login — doubles per consecutive failure, capped at `SOLIX_RETRY_MAX_MS`. Kept well past the login-throttle window; Anker throttles frequent logins and can escalate to a captcha |
+| `SOLIX_RETRY_MAX_MS` | `3600000` (1 h) | cap for the escalating Solix login-retry backoff |
 | `GO2RTC_CONFIG` | `/app/data/go2rtc.yaml` | generated from the live device list at startup |
 | `STREAM_IDLE_MS` | `300000` (5 min) | auto-off a camera's live P2P feed after this long with no detection event, even if HA still holds the stream "open" — stops the radio to save battery; the next detection reopens it. `0` disables |
 | `RTSP_IDLE_OFF_MS` | `300000` (5 min) | battery-saver: turn a **battery** camera's native `rtspStream` publish OFF after this long idle (no detection, no active bridge stream), so a forgotten `rtspStream=ON` can't drain it. Wired cameras are never touched. `0` disables |

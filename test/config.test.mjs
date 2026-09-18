@@ -22,6 +22,24 @@ test("FCM push store path is derived beside the session file", () => {
   );
 });
 
+test("SOLIX_SCENE_POLL_MS: default 90s, and a custom value is honoured", () => {
+  const solixEnv = { ...base, SOLIX_EMAIL: "s@a.z", SOLIX_PASSWORD: "sp" };
+  assert.equal(loadConfig(solixEnv).cfg.solix.scenePollMs, 90_000); // default
+  assert.equal(loadConfig({ ...solixEnv, SOLIX_SCENE_POLL_MS: "30000" }).cfg.solix.scenePollMs, 30_000);
+  // A non-numeric / empty value falls back to the default rather than NaN.
+  assert.equal(loadConfig({ ...solixEnv, SOLIX_SCENE_POLL_MS: "" }).cfg.solix.scenePollMs, 90_000);
+});
+
+test("SOLIX_RETRY_BASE_MS / SOLIX_RETRY_MAX_MS: defaults and custom values", () => {
+  const solixEnv = { ...base, SOLIX_EMAIL: "s@a.z", SOLIX_PASSWORD: "sp" };
+  const def = loadConfig(solixEnv).cfg.solix;
+  assert.equal(def.retryBaseMs, 15 * 60 * 1000); // 15 min
+  assert.equal(def.retryMaxMs, 60 * 60 * 1000); // 1 h
+  const custom = loadConfig({ ...solixEnv, SOLIX_RETRY_BASE_MS: "60000", SOLIX_RETRY_MAX_MS: "300000" }).cfg.solix;
+  assert.equal(custom.retryBaseMs, 60_000);
+  assert.equal(custom.retryMaxMs, 300_000);
+});
+
 test("openudid is undefined by default and taken from BRIDGE_OPENUDID when set", () => {
   assert.equal(loadConfig(base).cfg.openudid, undefined); // → SDK derives from email
   assert.equal(loadConfig({ ...base, BRIDGE_OPENUDID: "abcd1234abcd1234" }).cfg.openudid, "abcd1234abcd1234");
