@@ -4,6 +4,24 @@
 // through — returned so server.mjs can hang them on ctx for auth.mjs / boot.mjs / http-routes.mjs.
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
+import { SOLIX_CONTROLS, SOLIX_DISABLED } from "./solix.mjs";
+
+// Commands that require an authenticated eufy session — gated in one place before dispatch. (auth.* and
+// solix.* run before this gate, so a client can drive 2FA/captcha and Solix while eufy is still pending.)
+const AUTHED_COMMANDS = new Set([
+  "devices.list",
+  "device.state",
+  "device.properties",
+  "device.set",
+  "device.action",
+  "device.reboot",
+  "event.refresh",
+  "light.effects",
+  "config.get",
+  "config.set",
+  "stream.start",
+  "stream.stop",
+]);
 
 export function createWsServer(ctx, httpServer) {
   const { cfg, eufy, SCHEMA_VERSION, DEBUG, dbg } = ctx;
@@ -44,7 +62,26 @@ export function createWsServer(ctx, httpServer) {
     }
     const reply = (extra) => send(ws, { id, ok: true, ...extra });
     const fail = (error) => send(ws, { id, ok: false, error: String(error?.message ?? error) });
+    // Reject a bad request by throwing — the outer catch renders it as { ok:false, error }, the same
+    // client-visible result as `return fail(...)`, so the shared guards below don't thread a return.
+    const reject = (message) => { throw new Error(message); };
     try {
+      // Anker Solix control commands (table above) all share the same enable + target-device guards, so
+      // dispatch them here instead of repeating those two lines in ~10 near-identical switch cases.
+      const control = SOLIX_CONTROLS[cmd];
+      if (control) {
+        const fn = ctx[control.fn] ?? reject(SOLIX_DISABLED);
+        if (!msg.deviceSn) reject(`${cmd} needs ${control.needs}`);
+        for (const field of control.req ?? []) if (msg[field] == null) reject(`${cmd} needs ${control.needs}`);
+        if (control.check && !control.check(msg)) reject(`${cmd} needs ${control.needs}`);
+        return reply(control.out(msg, await control.run(fn, msg)));
+      }
+
+      // Everything else that isn't auth/Solix-status needs an authenticated eufy session.
+      if (AUTHED_COMMANDS.has(cmd) && !flags.ready) {
+        return fail("not authenticated — query auth.status and complete 2FA/captcha first");
+      }
+
       switch (cmd) {
         // ── auth ──
         case "auth.status":
@@ -61,36 +98,18 @@ export function createWsServer(ctx, httpServer) {
           await ctx.applyLogin(await eufy.login());
           return reply({ auth: ctx.authStatus() });
 
-        // ── Anker Solix (independent of eufy auth — its own account) ──
+        // ── Anker Solix status / challenge (not device controls — no target device / graceful when off) ──
         case "solix.status":
           return reply({ solix: ctx.solixStatus?.() ?? { enabled: false, state: "disabled", deviceCount: 0 } });
         case "solix.devices":
           return reply({ devices: ctx.solixDeviceList?.() ?? [] });
         case "solix.submitCode": {
-          if (!ctx.solixSubmitCode) return fail("solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)");
+          if (!ctx.solixSubmitCode) return fail(SOLIX_DISABLED);
           await ctx.solixSubmitCode(msg.code); // NB: the 2FA code (msg.code) is never logged
           return reply({ solix: ctx.solixStatus() });
         }
 
-        // ── device control (require auth) ──
-        case "devices.list":
-        case "device.state":
-        case "device.properties":
-        case "device.set":
-        case "device.action":
-        case "device.reboot":
-        case "event.refresh":
-        case "light.effects":
-        case "config.get":
-        case "config.set":
-        case "stream.start":
-        case "stream.stop":
-          if (!flags.ready) return fail("not authenticated — query auth.status and complete 2FA/captcha first");
-          break;
-        default:
-          return fail(`unknown cmd: ${cmd}`);
-      }
-      switch (cmd) {
+        // ── device control (require auth — gated above) ──
         case "devices.list": return reply({ devices: await ctx.deviceList() });
         case "device.state": return reply({ device: await ctx.describeDevice(msg.sn) });
         case "device.properties": {
@@ -160,7 +179,6 @@ export function createWsServer(ctx, httpServer) {
           }
           return reply({ effects: effectsCache });
         }
-
         case "config.get":
           // Current effective cloud poll interval (ms). 0 means polling is disabled.
           return reply({ pollMs: eufy.pollIntervalMs });
@@ -179,6 +197,9 @@ export function createWsServer(ctx, httpServer) {
             rtsp: `rtsp://${cfg.selfHost}:8554/${msg.sn}`,
           });
         case "stream.stop": return reply({}); // advisory; the media connection is the real signal
+
+        default:
+          return fail(`unknown cmd: ${cmd}`);
       }
     } catch (e) { if (e?.name === "SessionExpiredError") ctx.maybeRecoverSession(); return fail(e); }
   }
