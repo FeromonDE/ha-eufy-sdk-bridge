@@ -12,6 +12,96 @@ import {
   solarbankSceneReadings,
 } from "@mega-yfue/eufy-sdk";
 
+// Shown when a Solix command is used but Solix isn't configured (its `ctx.*` handler is absent).
+export const SOLIX_DISABLED = "solix is not enabled (set SOLIX_EMAIL / SOLIX_PASSWORD)";
+
+// ── Anker Solix control commands (WS `solix.*`) ─────────────────────────────────────────────────────
+// The WS dispatcher (ws-server.mjs) drives these; the handlers they name are installed on `ctx` by
+// `createSolix` below (its return object). Keeping the table beside the handlers means adding a control
+// is a single-file change: one `ctx.solix*` handler + one entry here. Every control has the same shape —
+// require Solix enabled (the `ctx[fn]` handler exists) and a target device, call the handler, echo a
+// small confirmation — so the dispatcher applies those guards once rather than repeating them per case.
+//   fn    — the ctx.* handler method name (its presence IS the "Solix enabled" test)
+//   needs — usage hint shown (as `<cmd> needs <needs>`) when the request is missing a required field
+//   req   — extra required msg fields beyond deviceSn (rejected when `== null`); optional
+//   check — optional extra predicate over msg (false ⇒ rejected with `needs`)
+//   run   — (fn, msg) => the handler call; its resolved value is passed to `out`
+//   out   — (msg, result) => the reply body
+export const SOLIX_CONTROLS = {
+  "solix.setLight": {
+    // Toggle a Solarbank's ambient light (encrypted+signed set_device_attrs write).
+    fn: "solixSetAmbientLight",
+    needs: "{ deviceSn, on }",
+    run: (fn, m) => fn(m.deviceSn, !!m.on),
+    out: (m) => ({ deviceSn: m.deviceSn, on: !!m.on }),
+  },
+  "solix.setDeviceAttrs": {
+    // Generic Solix attribute write (snake_case keys), for future controls.
+    fn: "solixSetDeviceAttrs",
+    needs: "{ deviceSn, attributes }",
+    run: (fn, m) => fn(m.deviceSn, m.attributes),
+    out: (m) => ({ deviceSn: m.deviceSn }),
+  },
+  "solix.getDeviceAttrs": {
+    // Read device attributes (e.g. screen_off_time) — plain authed read.
+    fn: "solixGetDeviceAttrs",
+    needs: "{ deviceSn, keys? }",
+    run: (fn, m) => fn(m.deviceSn, m.keys),
+    out: (m, attributes) => ({ deviceSn: m.deviceSn, attributes }),
+  },
+  "solix.setScreenOffTime": {
+    // Set the Solarbank display screen-off timeout (seconds); "Never" is a device sentinel.
+    fn: "solixSetScreenOffTime",
+    needs: "{ deviceSn, seconds }",
+    req: ["seconds"],
+    run: (fn, m) => fn(m.deviceSn, m.seconds),
+    out: (m) => ({ deviceSn: m.deviceSn, seconds: Number(m.seconds) }),
+  },
+  "solix.getPowerCutoff": {
+    // Read the battery discharge-cutoff (minimum-SOC) preset options.
+    fn: "solixGetPowerCutoff",
+    needs: "{ deviceSn, siteId? }",
+    run: (fn, m) => fn(m.deviceSn, m.siteId),
+    out: (m, options) => ({ deviceSn: m.deviceSn, options }),
+  },
+  "solix.setPowerCutoff": {
+    // Select a discharge-cutoff preset by id (id comes from getPowerCutoff).
+    fn: "solixSetPowerCutoff",
+    needs: "{ deviceSn, cutoffDataId }",
+    req: ["cutoffDataId"],
+    run: (fn, m) => fn(m.deviceSn, m.cutoffDataId),
+    out: (m) => ({ deviceSn: m.deviceSn, cutoffDataId: Number(m.cutoffDataId) }),
+  },
+  "solix.setDisplayTimeout": {
+    // Set the Solarbank display screen-off timeout by 1-based index (10s=1…30m=6) — MQTT command.
+    fn: "solixSetDisplayTimeout",
+    needs: "{ deviceSn, index }",
+    req: ["index"],
+    run: (fn, m) => fn(m.deviceSn, m.index),
+    out: (m) => ({ deviceSn: m.deviceSn, index: Number(m.index) }),
+  },
+  "solix.getSocParams": {
+    // Read the Solarbank battery SOC-limit block (discharge/charge limit, backup reserve).
+    fn: "solixGetSocParams",
+    needs: "{ deviceSn }",
+    run: (fn, m) => fn(m.deviceSn),
+    out: (m, params) => ({ deviceSn: m.deviceSn, params }),
+  },
+  "solix.setSocLimits": {
+    // Write the discharge and/or charge limit (whole-percent). Read-modify-write preserves the rest.
+    fn: "solixSetSocLimits",
+    needs: "{ deviceSn, dischargeLowerLimit? and/or chargeUpperLimit? }",
+    check: (m) => m.dischargeLowerLimit != null || m.chargeUpperLimit != null,
+    run: (fn, m) => {
+      const changes = {};
+      if (m.dischargeLowerLimit != null) changes.dischargeLowerLimit = Number(m.dischargeLowerLimit);
+      if (m.chargeUpperLimit != null) changes.chargeUpperLimit = Number(m.chargeUpperLimit);
+      return fn(m.deviceSn, changes);
+    },
+    out: (m, params) => ({ deviceSn: m.deviceSn, params }),
+  },
+};
+
 export function createSolix(ctx) {
   const { cfg } = ctx;
   const s = cfg.solix;
