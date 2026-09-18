@@ -32,12 +32,6 @@ RUN case "${TARGETARCH:-amd64}" in \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
-# LOCAL TEST BUILD ONLY: overlay a locally-built SDK (combined branch = eufy-sdk PRs #184/#185/#186/#187)
-# on top of the published beta, so this image runs that SDK without waiting for the PRs to merge and
-# republish. Delete these two lines + eufy-sdk-local.tgz to return to the plain beta.
-COPY eufy-sdk-local.tgz ./
-RUN npm install ./eufy-sdk-local.tgz --no-save --omit=dev --no-audit --no-fund
-
 COPY server.mjs streams.mjs go2rtc-config.mjs ./
 COPY src ./src
 COPY bin ./bin
