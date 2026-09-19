@@ -12,10 +12,58 @@ function json(res, code, body) {
   res.end(s);
 }
 
+// go2rtc's HTTP API (the fixed `:1984` the generated go2rtc.yaml listens on). Used only to answer
+// "who is pulling this stream?": the bridge's `/stream` is always pulled by go2rtc's OWN ffmpeg, so the
+// bridge alone can't see the human behind it — go2rtc can (it tracks each WebRTC/RTSP/HLS consumer).
+const GO2RTC_API_PORT = Number(process.env.GO2RTC_API_PORT) || 1984;
+// Throttle the go2rtc consumer probe per device (a stream can be re-requested on a tight retry loop).
+// `0` disables the probe; the immediate-requester line still logs on every request.
+const STREAM_CONSUMER_LOG_MS = Number(process.env.BRIDGE_STREAM_CONSUMER_LOG_MS ?? 15000);
+
 export function createHttpHandler(ctx) {
   const { cfg, eufy, SCHEMA_VERSION, eventImageDir } = ctx;
   const { flags } = ctx.state;
   const { streaming, idleSuspended, activeStreams, lastPullAttempt, rtspLastActive } = ctx.state;
+
+  // Ask go2rtc who is CONSUMING a stream (its remote address / user-agent / protocol) and log each — so
+  // a stream that keeps opening "by itself" can be traced to the real viewer (an HA card, a recording,
+  // a WebRTC/HLS client) rather than the go2rtc ffmpeg the bridge sees. Best-effort: on any error (go2rtc
+  // disabled / not ready) the immediate-requester line already logged is the fallback.
+  const lastConsumerLog = new Map(); // sn -> ts of the last probe
+  async function logStreamConsumers(sn) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${GO2RTC_API_PORT}/api/streams?src=${encodeURIComponent(sn)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      const consumers = (data?.consumers ?? data?.[sn]?.consumers ?? []).filter(Boolean);
+      if (!consumers.length) {
+        ctx.eventLog?.(`/stream ${sn} — go2rtc reports NO consumers (a leftover ffmpeg retry / probe, not a live viewer)`);
+        return;
+      }
+      for (const c of consumers) {
+        const who = c?.remote_addr || c?.remoteAddr || "?";
+        const ua = c?.user_agent || c?.userAgent || "";
+        const type = c?.type || (Array.isArray(c?.medias) ? c.medias.join(",") : "") || "consumer";
+        ctx.eventLog?.(`/stream ${sn} — go2rtc consumer: ${type} from ${who}${ua ? ` (UA: ${ua})` : ""}`);
+      }
+    } catch {
+      /* go2rtc API unreachable — the immediate-requester line is the fallback */
+    }
+  }
+
+  // Log every /stream request's IMMEDIATE requester (IP + UA). Normally that's go2rtc's own ffmpeg on
+  // localhost; anything else means something is pulling the bridge feed directly — itself a finding.
+  // Then (throttled) ask go2rtc who the real consumer is.
+  function noteStreamRequest(sn, req) {
+    const ip = req.socket?.remoteAddress ?? "?";
+    const ua = req.headers["user-agent"] ?? "";
+    ctx.eventLog?.(`/stream ${sn} requested by ${ip}${ua ? ` (UA: ${ua})` : ""}`);
+    if (!STREAM_CONSUMER_LOG_MS) return;
+    const now = Date.now();
+    if (now - (lastConsumerLog.get(sn) ?? 0) < STREAM_CONSUMER_LOG_MS) return;
+    lastConsumerLog.set(sn, now);
+    void logStreamConsumers(sn);
+  }
 
   return async function handleHttp(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -103,6 +151,7 @@ export function createHttpHandler(ctx) {
     }
 
     if (kind === "stream" && sn) {
+      noteStreamRequest(sn, req); // trace who is pulling this stream (incl. go2rtc's real consumers)
       if (cfg.streamIdleMs) lastPullAttempt.set(sn, Date.now()); // consumer is asking (watched vs. gone)
       // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's ffmpeg source
       // retries into this until a detection or the consumer giving up lifts it (see streamIdleTick).
