@@ -86,6 +86,11 @@ export function createHttpHandler(ctx) {
           ctx.eventLog(
             `/event-image ${sn} → 200 cached thumbnail (${cached.length}B, from disk; live unavailable: ${e?.reason ?? e?.message ?? e}) — Last event served`,
           );
+          // Auto-heal: the disk copy can be stale if the on-detection retry gave up before the HomeBase
+          // wrote the crop. Re-attempt the local cover in the background (throttled) so this fetch — and
+          // HA's periodic image re-pulls — advance "Last event" once the crop lands, without the manual
+          // "Refresh Last Event" button. Fire-and-forget: we serve the current copy right now regardless.
+          ctx.autoHealEventImage?.(sn);
           res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
           return res.end(cached);
         } catch {
