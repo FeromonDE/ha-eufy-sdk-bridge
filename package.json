@@ -10,13 +10,14 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "use:sdk-beta": "npm install --no-save @mega-yfue/eufy-sdk@beta"
   },
   "engines": {
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "@mega-yfue/eufy-sdk": "beta",
+    "@mega-yfue/eufy-sdk": "0.1.0",
     "ws": "^8.18.0"
   }
 }
