@@ -18,6 +18,8 @@ import { createHttpHandler } from "../src/http-routes.mjs";
 import { createWsServer } from "../src/ws-server.mjs";
 
 function fakeEufy() {
+  let getDeviceCalls = 0;
+  let armingMode = 0;
   const devices = {
     CAM1: {
       describe: () => ({
@@ -29,6 +31,18 @@ function fakeEufy() {
         capabilities: ["camera", "video", "battery"],
       }),
       getProperties: () => ({ battery: { value: 74 }, motion: { value: false } }),
+    },
+    HOMEBASE1: {
+      describe: () => ({
+        sn: "HOMEBASE1",
+        name: "HomeBase",
+        model: "T8030",
+        modelName: "HomeBase 3",
+        codec: "station",
+        capabilities: ["arming"],
+      }),
+      getProperties: () => ({ armingMode: { value: armingMode } }),
+      getProperty: (name) => (name === "armingMode" ? { value: armingMode } : undefined),
     },
     SENSOR1: {
       describe: () => ({
@@ -45,12 +59,19 @@ function fakeEufy() {
   return {
     pollIntervalMs: 600000,
     async getDevices() {
-      return [{ sn: "CAM1" }, { sn: "SENSOR1" }];
+      return [{ sn: "CAM1" }, { sn: "HOMEBASE1" }, { sn: "SENSOR1" }];
     },
     async getDevice(sn) {
+      getDeviceCalls++;
       const d = devices[sn];
       if (!d) throw new Error(`no device ${sn}`);
       return d;
+    },
+    setArmingMode(mode) {
+      armingMode = mode;
+    },
+    getDeviceCalls() {
+      return getDeviceCalls;
     },
     setPollInterval(ms) {
       this.pollIntervalMs = ms;
@@ -93,12 +114,36 @@ test("device view: describe shape + camera vs sensor", async () => {
   const list = await ctx.deviceList();
   const cam = list.find((d) => d.sn === "CAM1");
   const sensor = list.find((d) => d.sn === "SENSOR1");
-  assert.equal(list.length, 2);
+  assert.equal(list.length, 3);
   assert.equal(cam.stream, "/stream/CAM1");
   assert.equal(cam.streaming, false); // nothing piping
   assert.equal(cam.canReboot, false);
   assert.deepEqual(cam.state, { battery: 74, motion: false });
   assert.equal(sensor.stream, undefined); // not a camera
+  httpServer.close();
+});
+
+test("device view retains Device and enriches repeated arming events from live state", async () => {
+  const { ctx, httpServer } = buildCtx();
+
+  await ctx.describeDevice("HOMEBASE1");
+  assert.equal(ctx.eufy.getDeviceCalls(), 1);
+
+  ctx.eufy.setArmingMode(3);
+  assert.deepEqual(ctx.enrichDeviceEvent("armingModeChanged", { deviceSn: "HOMEBASE1" }), {
+    deviceSn: "HOMEBASE1",
+    mode: 3,
+  });
+
+  ctx.eufy.setArmingMode(5);
+  assert.deepEqual(ctx.enrichDeviceEvent("armingModeChanged", { deviceSn: "HOMEBASE1" }), {
+    deviceSn: "HOMEBASE1",
+    mode: 5,
+  });
+
+  // Re-describing the same serial must reuse the strongly-held Device instead of creating a new one.
+  await ctx.describeDevice("HOMEBASE1");
+  assert.equal(ctx.eufy.getDeviceCalls(), 1);
   httpServer.close();
 });
 
