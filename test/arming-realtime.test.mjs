@@ -144,20 +144,10 @@ test("cloud arming propertyChanged is translated immediately and deduped", () =>
   assert.equal(sent.length, 1);
 });
 
-test("guard-mode poll targets only station devices and seeds the current mode as baseline", () => {
-  const p2p = [];
-  const reads = [];
+test("guard-mode poll targets only HomeBase and publishes param 1224 changes", async () => {
+  const calls = [];
   const sent = [];
-  const devices = new Map([
-    [
-      "HB3",
-      {
-        getProperty(name) {
-          reads.push(["HB3", name]);
-        },
-      },
-    ],
-  ]);
+  let mode = 1;
   const ctx = {
     state: { armingOverrides: new Map(), timers: { armingPoll: null } },
     bumpActivity() {},
@@ -165,11 +155,18 @@ test("guard-mode poll targets only station devices and seeds the current mode as
     broadcast(evt) {
       sent.push(evt);
     },
-    requestP2PArmingMode(sn) {
-      p2p.push(sn);
-    },
-    cachedDevice(sn) {
-      return devices.get(sn);
+    eufy: {
+      api: {
+        async getDeviceParamList(sn) {
+          calls.push(sn);
+          return {
+            params: [
+              { param_type: 9999, param_value: "ignore" },
+              { param_type: 1224, param_value: String(mode) },
+            ],
+          };
+        },
+      },
     },
   };
   const rt = createArmingRealtime(ctx);
@@ -183,27 +180,23 @@ test("guard-mode poll targets only station devices and seeds the current mode as
   );
   clearInterval(ctx.state.timers.armingPoll);
   ctx.state.timers.armingPoll = null;
+  await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(p2p, ["HB3"]);
-  assert.deepEqual(reads, [["HB3", "armingMode"]]);
+  assert.deepEqual(calls, ["HB3"]);
   assert.equal(sent.length, 0);
 
-  assert.equal(
-    rt.onP2PArmingFrame("HB3", {
-      commandId: 1151,
-      data: Buffer.from([1]),
-    }),
-    false,
-  );
-  assert.equal(sent.length, 0);
+  mode = 3;
+  await rt.pollArmingModes();
 
-  assert.equal(
-    rt.onP2PArmingFrame("HB3", {
-      commandId: 1151,
-      data: Buffer.from([3]),
-    }),
-    true,
-  );
+  assert.deepEqual(calls, ["HB3", "HB3"]);
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].mode, 3);
+  assert.deepEqual(sent[0], {
+    event: "armingModeChanged",
+    deviceSn: "HB3",
+    mode: 3,
+    source: "cloud",
+  });
+
+  await rt.pollArmingModes();
+  assert.equal(sent.length, 1);
 });
