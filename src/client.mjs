@@ -4,22 +4,6 @@
 import { EufyMega, FileSessionStore, ConsoleLogger } from "@mega-yfue/eufy-sdk";
 
 export const BRIDGE_P2P_STATION_FRAME = "bridgeP2PStationFrame";
-const CMD_GET_ALARM_MODE = 1151;
-
-/**
- * Ask one already-connected HomeBase for its current guard mode.
- *
- * The pinned SDK exposes the live session map on its runtime P2P router, while P2PSession.sendCommand
- * is TypeScript-private only (a normal method in the published JS). We deliberately do not open a
- * session here: wired HomeBases are kept warm by auto-realtime, and a fast polling loop must never turn
- * an offline station into a repeated reconnect/broadcast storm.
- */
-export function requestP2PArmingMode(eufy, stationSn) {
-  const session = eufy?.p2p?.getSessions?.().get(stationSn);
-  if (!session?.isConnected || typeof session.sendCommand !== "function") return false;
-  session.sendCommand(CMD_GET_ALARM_MODE);
-  return true;
-}
 
 /**
  * Preserve the station serial on raw P2P frames.
