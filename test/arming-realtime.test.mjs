@@ -103,3 +103,99 @@ test("unrelated P2P and push events are ignored", () => {
   assert.equal(guardModeFromP2PFrame("HB3", { commandId: 1152, data: Buffer.from([3]) }), undefined);
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
+
+test("cloud arming propertyChanged is translated immediately and deduped", () => {
+  const sent = [];
+  const logs = [];
+  const ctx = {
+    state: { armingOverrides: new Map(), timers: { armingPoll: null } },
+    bumpActivity() {},
+    eventLog(line) {
+      logs.push(line);
+    },
+    broadcast(evt) {
+      sent.push(evt);
+    },
+  };
+  const rt = createArmingRealtime(ctx);
+
+  assert.equal(
+    rt.onCloudArmingPropertyChanged({
+      deviceSn: "HB3",
+      property: "armingMode",
+      value: 4,
+    }),
+    true,
+  );
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mode, 4);
+  assert.equal(sent[0].source, "cloud");
+  assert.match(logs[0], /propertyChanged armingMode/);
+
+  assert.equal(
+    rt.onCloudArmingPropertyChanged({
+      deviceSn: "HB3",
+      property: "armingMode",
+      value: 4,
+    }),
+    false,
+  );
+  assert.equal(sent.length, 1);
+});
+
+test("guard-mode poll targets only HomeBase and publishes param 1224 changes", async () => {
+  const calls = [];
+  const sent = [];
+  let mode = 1;
+  const ctx = {
+    state: { armingOverrides: new Map(), timers: { armingPoll: null } },
+    bumpActivity() {},
+    eventLog() {},
+    broadcast(evt) {
+      sent.push(evt);
+    },
+    eufy: {
+      api: {
+        async getDeviceParamList(sn) {
+          calls.push(sn);
+          return {
+            params: [
+              { param_type: 9999, param_value: "ignore" },
+              { param_type: 1224, param_value: String(mode) },
+            ],
+          };
+        },
+      },
+    },
+  };
+  const rt = createArmingRealtime(ctx);
+
+  assert.equal(
+    rt.startArmingPoll([
+      { sn: "HB3", codec: "station", state: { armingMode: 1 } },
+      { sn: "CAM1", codec: "camera", state: { armingMode: 1 } },
+    ]),
+    1,
+  );
+  clearInterval(ctx.state.timers.armingPoll);
+  ctx.state.timers.armingPoll = null;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, ["HB3"]);
+  assert.equal(sent.length, 0);
+
+  mode = 3;
+  await rt.pollArmingModes();
+
+  assert.deepEqual(calls, ["HB3", "HB3"]);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0], {
+    event: "armingModeChanged",
+    deviceSn: "HB3",
+    mode: 3,
+    source: "cloud",
+  });
+
+  await rt.pollArmingModes();
+  assert.equal(sent.length, 1);
+});

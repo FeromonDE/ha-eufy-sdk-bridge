@@ -8,6 +8,8 @@ const MODE_SWITCH = 9;
 const CMD_GET_ALARM_MODE = 1151;
 const VALID_MODES = new Set([0, 1, 2, 3, 4, 5, 6, 47, 63]);
 const OVERRIDE_TTL_MS = 10 * 60_000;
+const ARMING_POLL_MS = 5_000;
+const GUARD_MODE_PARAM = 1224;
 
 function asMode(value) {
   if (value === undefined || value === null || value === "") return undefined;
@@ -38,6 +40,8 @@ export function guardModeFromP2PFrame(stationSn, frame) {
 
 export function createArmingRealtime(ctx) {
   const overrides = ctx.state.armingOverrides;
+  const lastModes = new Map();
+  let stationSns = [];
 
   function armingModeOverride(sn, sdkMode) {
     const held = overrides.get(sn);
@@ -54,6 +58,8 @@ export function createArmingRealtime(ctx) {
   }
 
   function publish(update, source, detail) {
+    if (lastModes.get(update.deviceSn) === update.mode) return false;
+    lastModes.set(update.deviceSn, update.mode);
     overrides.set(update.deviceSn, { mode: update.mode, at: Date.now() });
     ctx.bumpActivity();
     ctx.eventLog(`${detail} sn=${update.deviceSn} mode=${update.mode} -> HA`);
@@ -78,5 +84,64 @@ export function createArmingRealtime(ctx) {
     return publish(update, "p2p", "CMD_GET_ALARM_MODE 1151");
   }
 
-  return { armingModeOverride, onRawArmingPush, onP2PArmingFrame };
+  function onCloudArmingPropertyChanged(change) {
+    if (change?.property !== "armingMode") return false;
+    const deviceSn = change?.deviceSn;
+    const mode = asMode(change?.value);
+    if (typeof deviceSn !== "string" || !deviceSn || mode === undefined) return false;
+    return publish({ deviceSn, mode }, "cloud", "propertyChanged armingMode");
+  }
+
+  /**
+   * A remote Eufy-app mode change is not guaranteed to generate MODE_SWITCH or an unsolicited 1151 on
+   * our second client session. Poll only the HomeBase's live cloud param overlay every five seconds.
+   *
+   * This is one owner-scoped get_device_param_list call per HomeBase, not the SDK's account-wide
+   * get_house_list/get_devs_list poll. Param 1224 is the selected guard mode. Publishing through the
+   * same path keeps HA event-driven while armingModeOverride shields reads from the SDK's slower cache.
+   */
+  let pollBusy = false;
+  async function pollArmingModes() {
+    if (pollBusy) return;
+    pollBusy = true;
+    try {
+      for (const sn of stationSns) {
+        try {
+          const live = await ctx.eufy.api.getDeviceParamList(sn);
+          const raw = live?.params?.find((p) => Number(p?.param_type) === GUARD_MODE_PARAM)?.param_value;
+          const mode = asMode(raw);
+          if (mode !== undefined) publish({ deviceSn: sn, mode }, "cloud", "targeted guard-mode poll");
+        } catch (e) {
+          ctx.dbg?.(`arming cloud poll failed sn=${sn}: ${e?.message ?? e}`);
+        }
+      }
+    } finally {
+      pollBusy = false;
+    }
+  }
+
+  function startArmingPoll(summaries) {
+    const stations = (summaries ?? []).filter((d) => d?.codec === "station");
+    stationSns = stations.map((d) => d.sn);
+    for (const station of stations) {
+      const mode = asMode(station?.state?.armingMode);
+      if (mode !== undefined) lastModes.set(station.sn, mode);
+    }
+    if (!stationSns.length) return 0;
+    void pollArmingModes();
+    if (!ctx.state.timers.armingPoll) {
+      ctx.state.timers.armingPoll = setInterval(() => void pollArmingModes(), ARMING_POLL_MS);
+      ctx.state.timers.armingPoll.unref?.();
+    }
+    return stationSns.length;
+  }
+
+  return {
+    armingModeOverride,
+    onRawArmingPush,
+    onP2PArmingFrame,
+    onCloudArmingPropertyChanged,
+    pollArmingModes,
+    startArmingPoll,
+  };
 }

@@ -95,6 +95,10 @@ eufy.on("push", (event) => {
 eufy.on(BRIDGE_P2P_STATION_FRAME, ({ stationSn, frame }) => {
   ctx.onP2PArmingFrame(stationSn, frame);
 });
+// Targeted cloud-read fallback: Device freshness refreshes emit propertyChanged, not armingModeChanged.
+eufy.on("propertyChanged", (change) => {
+  ctx.onCloudArmingPropertyChanged(change);
+});
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────
 async function main() {
@@ -115,6 +119,7 @@ async function shutdown() {
   if (timers.watchdog) clearInterval(timers.watchdog);
   if (timers.streamIdle) clearInterval(timers.streamIdle);
   if (timers.rtspIdle) clearInterval(timers.rtspIdle);
+  if (timers.armingPoll) clearInterval(timers.armingPoll);
   flags.go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
