@@ -103,9 +103,6 @@ test("raw MODE_SWITCH remains a fallback fast path", () => {
 });
 
 test("unrelated P2P and push events are ignored", () => {
-  assert.equal(
-    guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }),
-    undefined,
-  );
+  assert.equal(guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }), undefined);
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
