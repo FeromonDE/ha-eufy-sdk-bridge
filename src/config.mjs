@@ -56,6 +56,7 @@ export const SUSPEND_RELEASE_MS = 30_000; // no /stream pull this long while sus
  * routes the SDK's raw per-frame ConsoleLogger (very noisy).
  */
 export function loadConfig(env = process.env) {
+  const snapshotLive = env.SNAPSHOT_LIVE;
   const cfg = {
     email: env.EUFY_EMAIL,
     password: env.EUFY_PASSWORD,
@@ -76,8 +77,7 @@ export function loadConfig(env = process.env) {
     // A live snapshot wakes a battery camera's radio, while HA may refresh camera tiles repeatedly.
     // 1 forces live snapshots everywhere; 0 disables live snapshots everywhere. In both cases the
     // retained/persisted event thumbnail remains available as a no-wake fallback.
-    snapshotLive:
-      env.SNAPSHOT_LIVE == null || env.SNAPSHOT_LIVE === "auto" ? "auto" : truthy(env.SNAPSHOT_LIVE),
+    snapshotLive: snapshotLive == null || snapshotLive === "auto" ? "auto" : truthy(snapshotLive),
     // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
