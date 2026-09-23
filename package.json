@@ -12,7 +12,8 @@
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
     "lint": "prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "postinstall": "node scripts/patch-eufy-sdk-arming.mjs"
   },
   "engines": {
     "node": ">=24.0.0"
