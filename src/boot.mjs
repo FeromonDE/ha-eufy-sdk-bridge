@@ -4,6 +4,7 @@
 // kicked off after `ready` so they don't hold up serving.
 import { spawn } from "node:child_process";
 import { writeGo2rtcConfig } from "../go2rtc-config.mjs";
+import { prepareStreamClients } from "../streams.mjs";
 
 export function createBoot(ctx) {
   const { cfg, eufy, DEBUG, SCHEMA_VERSION, dbg, DETECTION_EVENTS, FORWARDED_EVENTS } = ctx;
@@ -66,6 +67,9 @@ export function createBoot(ctx) {
       const summaries = await ctx.deviceList();
       const cams = await writeGo2rtcConfig(cfg, summaries);
       startGo2rtc();
+      // Remove login/device-resolution work from the first viewer without waking battery cameras.
+      // autoRealtime:false stream clients stay transport-idle until /stream calls openReadable().
+      void prepareStreamClients(cams, cfg);
       flags.ready = true;
       flags.lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
       timers.watchdog ??= setInterval(() => void ctx.watchdogTick(), 2 * 60_000);
