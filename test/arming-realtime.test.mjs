@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  createArmingRealtime,
-  guardModeFromP2PFrame,
-  guardModeFromPush,
-} from "../src/arming-realtime.mjs";
+import { createArmingRealtime, guardModeFromP2PFrame, guardModeFromPush } from "../src/arming-realtime.mjs";
 
 test("MODE_SWITCH uses payload.arming as the selected guard mode", () => {
   assert.deepEqual(
@@ -107,6 +103,9 @@ test("raw MODE_SWITCH remains a fallback fast path", () => {
 });
 
 test("unrelated P2P and push events are ignored", () => {
-  assert.equal(guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }), undefined);
+  assert.equal(
+    guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }),
+    undefined,
+  );
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
