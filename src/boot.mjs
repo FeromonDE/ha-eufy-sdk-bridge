@@ -65,6 +65,7 @@ export function createBoot(ctx) {
       // a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to "other"),
       // so go2rtc registers exactly the cameras HA shows.
       const summaries = await ctx.deviceList();
+      ctx.startArmingPoll?.(summaries);
       const cams = await writeGo2rtcConfig(cfg, summaries);
       startGo2rtc();
       // Remove login/device-resolution work from the first viewer without waking battery cameras.
