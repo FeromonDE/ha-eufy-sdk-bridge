@@ -77,9 +77,7 @@ export function loadConfig(env = process.env) {
     // 1 forces live snapshots everywhere; 0 disables live snapshots everywhere. In both cases the
     // retained/persisted event thumbnail remains available as a no-wake fallback.
     snapshotLive:
-      env.SNAPSHOT_LIVE == null || env.SNAPSHOT_LIVE === "auto"
-        ? "auto"
-        : truthy(env.SNAPSHOT_LIVE),
+      env.SNAPSHOT_LIVE == null || env.SNAPSHOT_LIVE === "auto" ? "auto" : truthy(env.SNAPSHOT_LIVE),
     // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
