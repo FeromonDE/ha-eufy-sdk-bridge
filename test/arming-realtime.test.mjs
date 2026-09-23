@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createArmingRealtime, guardModeFromPush } from "../src/arming-realtime.mjs";
+import {
+  createArmingRealtime,
+  guardModeFromP2PFrame,
+  guardModeFromPush,
+} from "../src/arming-realtime.mjs";
 
 test("MODE_SWITCH uses payload.arming as the selected guard mode", () => {
   assert.deepEqual(
@@ -25,7 +29,60 @@ test("Schedule keeps guard mode 2 even when current mode differs", () => {
   );
 });
 
-test("raw MODE_SWITCH broadcasts immediately and overrides stale SDK state", () => {
+test("HomeBase P2P CMD_GET_ALARM_MODE 1151 reports mode from byte zero", () => {
+  assert.deepEqual(
+    guardModeFromP2PFrame({
+      stationSn: "HB3",
+      commandId: 1151,
+      data: Buffer.from([4]),
+    }),
+    { deviceSn: "HB3", mode: 4 },
+  );
+  assert.deepEqual(
+    guardModeFromP2PFrame({
+      stationSn: "HB3",
+      commandId: 1151,
+      data: Buffer.from([63]),
+    }),
+    { deviceSn: "HB3", mode: 63 },
+  );
+});
+
+test("P2P 1151 broadcasts immediately and overrides stale SDK state", () => {
+  const sent = [];
+  const logs = [];
+  const ctx = {
+    state: { armingOverrides: new Map() },
+    bumpActivity() {},
+    eventLog(line) {
+      logs.push(line);
+    },
+    broadcast(evt) {
+      sent.push(evt);
+    },
+  };
+  const rt = createArmingRealtime(ctx);
+
+  assert.equal(
+    rt.onP2PArmingFrame({
+      stationSn: "HB3",
+      commandId: 1151,
+      data: Buffer.from([5]),
+    }),
+    true,
+  );
+  assert.deepEqual(sent[0], {
+    event: "armingModeChanged",
+    deviceSn: "HB3",
+    mode: 5,
+    source: "p2p",
+  });
+  assert.match(logs[0], /CMD_GET_ALARM_MODE 1151/);
+  assert.equal(rt.armingModeOverride("HB3", 0), 5);
+  assert.equal(rt.armingModeOverride("HB3", 5), undefined);
+});
+
+test("raw MODE_SWITCH remains a fallback fast path", () => {
   const sent = [];
   const ctx = {
     state: { armingOverrides: new Map() },
@@ -41,20 +98,15 @@ test("raw MODE_SWITCH broadcasts immediately and overrides stale SDK state", () 
     rt.onRawArmingPush({
       eventType: 9,
       stationSn: "HB3",
-      payload: { arming: 5, mode: 5 },
+      payload: { arming: 3, mode: 3 },
     }),
     true,
   );
-  assert.deepEqual(sent[0], {
-    event: "armingModeChanged",
-    deviceSn: "HB3",
-    mode: 5,
-    source: "push",
-  });
-  assert.equal(rt.armingModeOverride("HB3", 0), 5);
-  assert.equal(rt.armingModeOverride("HB3", 5), undefined);
+  assert.equal(sent[0].mode, 3);
+  assert.equal(sent[0].source, "push");
 });
 
-test("non-mode pushes are ignored", () => {
+test("unrelated P2P and push events are ignored", () => {
+  assert.equal(guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }), undefined);
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
