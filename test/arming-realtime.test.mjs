@@ -104,7 +104,6 @@ test("unrelated P2P and push events are ignored", () => {
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
 
-
 test("cloud arming propertyChanged is translated immediately and deduped", () => {
   const sent = [];
   const logs = [];
