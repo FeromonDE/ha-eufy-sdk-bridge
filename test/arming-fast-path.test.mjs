@@ -55,8 +55,5 @@ test("armingMode fails loudly when the cached device has no arming surface", asy
     eufy: { setProperty: async () => {} },
   };
 
-  await assert.rejects(
-    () => setDeviceProperty(ctx, "CAM1", "armingMode", 1),
-    /no arming control on CAM1/,
-  );
+  await assert.rejects(() => setDeviceProperty(ctx, "CAM1", "armingMode", 1), /no arming control on CAM1/);
 });
