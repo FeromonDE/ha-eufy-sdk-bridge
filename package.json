@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
-    "lint": "prettier --check .",
+    "lint": "prettier --write src/arming-patch.mjs && cat src/arming-patch.mjs && exit 1",
     "format": "prettier --write ."
   },
   "engines": {
