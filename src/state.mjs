@@ -25,6 +25,7 @@ export function createState() {
 
     clients: new Set(), // connected WS clients (broadcast targets)
     streaming: new Set(), // sns with a live P2P feed piping right now
+    armingOverrides: new Map(), // sn -> { mode, at }; raw MODE_SWITCH beats lagging cloud until convergence
 
     // person_id -> { name, familiar } — the HomeBase edge-AI face roster, built once at startup.
     faceNames: new Map(),
