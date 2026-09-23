@@ -28,12 +28,12 @@ export function guardModeFromPush(event) {
   return { deviceSn, mode };
 }
 
-export function guardModeFromP2PFrame(frame) {
+export function guardModeFromP2PFrame(stationSn, frame) {
   if (Number(frame?.commandId) !== CMD_GET_ALARM_MODE) return undefined;
-  if (typeof frame?.stationSn !== "string" || !frame.stationSn) return undefined;
+  if (typeof stationSn !== "string" || !stationSn) return undefined;
   if (!Buffer.isBuffer(frame?.data) || frame.data.length < 1) return undefined;
   const mode = asMode(frame.data.readUInt8(0));
-  return mode === undefined ? undefined : { deviceSn: frame.stationSn, mode };
+  return mode === undefined ? undefined : { deviceSn: stationSn, mode };
 }
 
 export function createArmingRealtime(ctx) {
@@ -72,8 +72,8 @@ export function createArmingRealtime(ctx) {
     return publish(update, "push", "MODE_SWITCH raw");
   }
 
-  function onP2PArmingFrame(frame) {
-    const update = guardModeFromP2PFrame(frame);
+  function onP2PArmingFrame(stationSn, frame) {
+    const update = guardModeFromP2PFrame(stationSn, frame);
     if (!update) return false;
     return publish(update, "p2p", "CMD_GET_ALARM_MODE 1151");
   }
