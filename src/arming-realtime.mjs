@@ -1,8 +1,11 @@
-// Realtime guard-mode fast path.
+// Realtime guard-mode fast paths.
 //
-// The SDK semantic armingModeChanged event waits for cloud convergence. The raw MODE_SWITCH push
-// already carries the selected guard mode in payload.arming, so the bridge can update HA immediately.
+// The SDK semantic armingModeChanged event waits for cloud convergence. HomeBase also reports its
+// current alarm mode directly on the persistent P2P control channel as CMD_GET_ALARM_MODE (1151).
+// That frame is the preferred fast path; raw MODE_SWITCH push remains a fallback for devices/accounts
+// that deliver it.
 const MODE_SWITCH = 9;
+const CMD_GET_ALARM_MODE = 1151;
 const VALID_MODES = new Set([0, 1, 2, 3, 4, 5, 6, 47, 63]);
 const OVERRIDE_TTL_MS = 10 * 60_000;
 
@@ -25,6 +28,14 @@ export function guardModeFromPush(event) {
   return { deviceSn, mode };
 }
 
+export function guardModeFromP2PFrame(frame) {
+  if (Number(frame?.commandId) !== CMD_GET_ALARM_MODE) return undefined;
+  if (typeof frame?.stationSn !== "string" || !frame.stationSn) return undefined;
+  if (!Buffer.isBuffer(frame?.data) || frame.data.length < 1) return undefined;
+  const mode = asMode(frame.data.readUInt8(0));
+  return mode === undefined ? undefined : { deviceSn: frame.stationSn, mode };
+}
+
 export function createArmingRealtime(ctx) {
   const overrides = ctx.state.armingOverrides;
 
@@ -42,28 +53,30 @@ export function createArmingRealtime(ctx) {
     return held.mode;
   }
 
-  function onRawArmingPush(event) {
-    const update = guardModeFromPush(event);
-    if (!update) return false;
+  function publish(update, source, detail) {
     overrides.set(update.deviceSn, { mode: update.mode, at: Date.now() });
     ctx.bumpActivity();
-    ctx.eventLog(
-      "MODE_SWITCH raw sn=" +
-        update.deviceSn +
-        " guard=" +
-        update.mode +
-        " current=" +
-        String(event?.payload?.mode ?? "?") +
-        " -> HA",
-    );
+    ctx.eventLog(`${detail} sn=${update.deviceSn} mode=${update.mode} -> HA`);
     ctx.broadcast({
       event: "armingModeChanged",
       deviceSn: update.deviceSn,
       mode: update.mode,
-      source: "push",
+      source,
     });
     return true;
   }
 
-  return { armingModeOverride, onRawArmingPush };
+  function onRawArmingPush(event) {
+    const update = guardModeFromPush(event);
+    if (!update) return false;
+    return publish(update, "push", "MODE_SWITCH raw");
+  }
+
+  function onP2PArmingFrame(frame) {
+    const update = guardModeFromP2PFrame(frame);
+    if (!update) return false;
+    return publish(update, "p2p", "CMD_GET_ALARM_MODE 1151");
+  }
+
+  return { armingModeOverride, onRawArmingPush, onP2PArmingFrame };
 }

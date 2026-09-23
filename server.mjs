@@ -90,6 +90,10 @@ eufy.on("pushDisconnect", () => {
 eufy.on("push", (event) => {
   ctx.onRawArmingPush(event);
 });
+// HomeBase reports alarm-mode changes on its persistent control P2P session as command 1151.
+eufy.on("p2p", (frame) => {
+  ctx.onP2PArmingFrame(frame);
+});
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────
 async function main() {
