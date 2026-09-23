@@ -5,6 +5,19 @@
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
 
+export async function setDeviceProperty(ctx, sn, name, value) {
+  if (name === "armingMode") {
+    const dev = await ctx.deviceFor(sn);
+    const arming = dev.arming?.();
+    if (!arming || typeof arming.setMode !== "function") {
+      throw new Error(`no arming control on ${sn}`);
+    }
+    await arming.setMode(value);
+    return;
+  }
+  await ctx.eufy.setProperty(sn, name, value);
+}
+
 export function createWsServer(ctx, httpServer) {
   const { cfg, eufy, SCHEMA_VERSION, DEBUG, dbg } = ctx;
   const { flags, clients } = ctx.state;
@@ -96,7 +109,7 @@ export function createWsServer(ctx, httpServer) {
           const t0 = Date.now();
           dbg(`device.set → setProperty sn=${msg.sn} name=${msg.name} value=${JSON.stringify(msg.value)}`);
           try {
-            await eufy.setProperty(msg.sn, msg.name, msg.value);
+            await setDeviceProperty(ctx, msg.sn, msg.name, msg.value);
             dbg(`device.set OK sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms)`);
           } catch (e) {
             console.error(
