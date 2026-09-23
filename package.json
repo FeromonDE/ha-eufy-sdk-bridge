@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
-    "lint": "prettier --check .",
+    "lint": "prettier --write test/arming-realtime.test.mjs && cat test/arming-realtime.test.mjs && exit 1",
     "format": "prettier --write ."
   },
   "engines": {
