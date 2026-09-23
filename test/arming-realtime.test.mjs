@@ -27,16 +27,14 @@ test("Schedule keeps guard mode 2 even when current mode differs", () => {
 
 test("HomeBase P2P CMD_GET_ALARM_MODE 1151 reports mode from byte zero", () => {
   assert.deepEqual(
-    guardModeFromP2PFrame({
-      stationSn: "HB3",
+    guardModeFromP2PFrame("HB3", {
       commandId: 1151,
       data: Buffer.from([4]),
     }),
     { deviceSn: "HB3", mode: 4 },
   );
   assert.deepEqual(
-    guardModeFromP2PFrame({
-      stationSn: "HB3",
+    guardModeFromP2PFrame("HB3", {
       commandId: 1151,
       data: Buffer.from([63]),
     }),
@@ -60,8 +58,7 @@ test("P2P 1151 broadcasts immediately and overrides stale SDK state", () => {
   const rt = createArmingRealtime(ctx);
 
   assert.equal(
-    rt.onP2PArmingFrame({
-      stationSn: "HB3",
+    rt.onP2PArmingFrame("HB3", {
       commandId: 1151,
       data: Buffer.from([5]),
     }),
@@ -103,6 +100,6 @@ test("raw MODE_SWITCH remains a fallback fast path", () => {
 });
 
 test("unrelated P2P and push events are ignored", () => {
-  assert.equal(guardModeFromP2PFrame({ stationSn: "HB3", commandId: 1152, data: Buffer.from([3]) }), undefined);
+  assert.equal(guardModeFromP2PFrame("HB3", { commandId: 1152, data: Buffer.from([3]) }), undefined);
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
