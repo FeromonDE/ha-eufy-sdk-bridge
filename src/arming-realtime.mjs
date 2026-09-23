@@ -9,6 +9,7 @@ const CMD_GET_ALARM_MODE = 1151;
 const VALID_MODES = new Set([0, 1, 2, 3, 4, 5, 6, 47, 63]);
 const OVERRIDE_TTL_MS = 10 * 60_000;
 const ARMING_POLL_MS = 5_000;
+const GUARD_MODE_PARAM = 1224;
 
 function asMode(value) {
   if (value === undefined || value === null || value === "") return undefined;
@@ -93,20 +94,29 @@ export function createArmingRealtime(ctx) {
 
   /**
    * A remote Eufy-app mode change is not guaranteed to generate MODE_SWITCH or an unsolicited 1151 on
-   * our second client session. Poll only the wired HomeBase control plane every five seconds instead of
-   * shrinking the account-wide cloud poll. Also touch the cached property: if the P2P session is absent
-   * or a firmware ignores the query, the SDK's 15 s read-through cache performs a targeted cloud refresh,
-   * whose propertyChanged event is translated above.
+   * our second client session. Poll only the HomeBase's live cloud param overlay every five seconds.
+   *
+   * This is one owner-scoped get_device_param_list call per HomeBase, not the SDK's account-wide
+   * get_house_list/get_devs_list poll. Param 1224 is the selected guard mode. Publishing through the
+   * same path keeps HA event-driven while armingModeOverride shields reads from the SDK's slower cache.
    */
-  function pollArmingModes() {
-    for (const sn of stationSns) {
-      try {
-        ctx.requestP2PArmingMode?.(sn);
-      } catch (e) {
-        ctx.dbg?.(`arming poll P2P failed sn=${sn}: ${e?.message ?? e}`);
+  let pollBusy = false;
+  async function pollArmingModes() {
+    if (pollBusy) return;
+    pollBusy = true;
+    try {
+      for (const sn of stationSns) {
+        try {
+          const live = await ctx.eufy.api.getDeviceParamList(sn);
+          const raw = live?.params?.find((p) => Number(p?.param_type) === GUARD_MODE_PARAM)?.param_value;
+          const mode = asMode(raw);
+          if (mode !== undefined) publish({ deviceSn: sn, mode }, "cloud", "targeted guard-mode poll");
+        } catch (e) {
+          ctx.dbg?.(`arming cloud poll failed sn=${sn}: ${e?.message ?? e}`);
+        }
       }
-      // Non-blocking. SDK coalesces and rate-limits this to its cache TTL (15 s by default).
-      ctx.cachedDevice?.(sn)?.getProperty?.("armingMode");
+    } finally {
+      pollBusy = false;
     }
   }
 
@@ -118,9 +128,9 @@ export function createArmingRealtime(ctx) {
       if (mode !== undefined) lastModes.set(station.sn, mode);
     }
     if (!stationSns.length) return 0;
-    pollArmingModes();
+    void pollArmingModes();
     if (!ctx.state.timers.armingPoll) {
-      ctx.state.timers.armingPoll = setInterval(pollArmingModes, ARMING_POLL_MS);
+      ctx.state.timers.armingPoll = setInterval(() => void pollArmingModes(), ARMING_POLL_MS);
       ctx.state.timers.armingPoll.unref?.();
     }
     return stationSns.length;
