@@ -15,7 +15,7 @@ import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
 import { enableCustomArmingModes } from "./src/arming-patch.mjs";
 import { createState } from "./src/state.mjs";
-import { createEufy } from "./src/client.mjs";
+import { BRIDGE_P2P_STATION_FRAME, createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
 import { createArmingRealtime } from "./src/arming-realtime.mjs";
@@ -91,8 +91,9 @@ eufy.on("push", (event) => {
   ctx.onRawArmingPush(event);
 });
 // HomeBase reports alarm-mode changes on its persistent control P2P session as command 1151.
-eufy.on("p2p", (frame) => {
-  ctx.onP2PArmingFrame(frame);
+// Use the bridge-local station-tagged event: SDK 0.1.0's public "p2p" event drops stationSn.
+eufy.on(BRIDGE_P2P_STATION_FRAME, ({ stationSn, frame }) => {
+  ctx.onP2PArmingFrame(stationSn, frame);
 });
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────
