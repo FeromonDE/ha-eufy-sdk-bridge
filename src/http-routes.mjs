@@ -4,7 +4,7 @@
 // request handler; server.mjs wraps it in http.createServer.
 import fs from "node:fs";
 import path from "node:path";
-import { streamCameraFor } from "../streams.mjs";
+import { dropStreamClient, streamCameraFor } from "../streams.mjs";
 import { createAnnexBNormalizer } from "./annexb-stream.mjs";
 
 function json(res, code, body) {
@@ -14,7 +14,10 @@ function json(res, code, body) {
 }
 
 export function createHttpHandler(ctx) {
-  const { cfg, eufy, SCHEMA_VERSION, eventImageDir } = ctx;
+  const { cfg, SCHEMA_VERSION, eventImageDir } = ctx;
+  // Production uses the per-camera cache in streams.mjs; tests can inject these two lifecycle hooks.
+  const openStreamCamera = ctx.streamCameraFor ?? streamCameraFor;
+  const dropStreamCamera = ctx.dropStreamClient ?? dropStreamClient;
   const { flags } = ctx.state;
   const { streaming, idleSuspended, activeStreams, lastPullAttempt, rtspLastActive } = ctx.state;
 
@@ -40,21 +43,63 @@ export function createHttpHandler(ctx) {
     }
     if (!flags.ready) return json(res, 503, { error: "not authenticated", auth: ctx.authStatus() });
 
-    // A current still: a fresh live burst, falling back to the retained push thumbnail.
+    // A current still. Battery cameras should not pay a P2P radio wake every time HA refreshes a tile:
+    // in the default "auto" mode they use the retained/persisted event thumbnail instead. Mains cameras
+    // still get a fresh live burst. The persisted last-event image is also the final fallback on errors.
     if (kind === "snapshot" && sn) {
-      try {
-        const cam = (await ctx.deviceFor(sn)).camera?.();
-        if (!cam) return json(res, 404, { error: "no camera on this device" });
-        let jpeg;
+      const file = path.join(eventImageDir, `last-event-${sn}.jpg`);
+      const servePersisted = async (why) => {
         try {
-          ({ jpeg } = await cam.snapshotLive());
+          const cached = await fs.promises.readFile(file);
+          ctx.eventLog?.(`/snapshot ${sn} → 200 last event thumbnail (${cached.length}B, from disk; ${why})`);
+          res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
+          res.end(cached);
+          return true;
         } catch {
-          jpeg = await cam.snapshotStored?.(); // may throw when nothing is retained
+          return false;
         }
-        if (!jpeg) return json(res, 404, { error: "no image available" });
-        res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
-        return res.end(jpeg);
+      };
+
+      try {
+        const device = await ctx.deviceFor(sn);
+        const cam = device.camera?.();
+        if (!cam) return json(res, 404, { error: "no camera on this device" });
+
+        const onBattery = (device.describe?.()?.capabilities ?? []).includes("battery");
+        const wantLive = cfg.snapshotLive === "auto" ? !onBattery : cfg.snapshotLive;
+        let jpeg;
+        let why =
+          cfg.snapshotLive === "auto"
+            ? "battery camera — no live burst (SNAPSHOT_LIVE=auto)"
+            : "live burst disabled (SNAPSHOT_LIVE=0)";
+
+        if (wantLive) {
+          try {
+            ({ jpeg } = await cam.snapshotLive());
+            why = "";
+          } catch (e) {
+            why = `live burst failed: ${e?.message ?? e}`;
+          }
+        } else if (await servePersisted(why)) {
+          return;
+        }
+
+        if (!jpeg) {
+          try {
+            jpeg = await cam.snapshotStored?.();
+          } catch (e) {
+            why = `${why ? `${why}; ` : ""}nothing retained: ${e?.reason ?? e?.message ?? e}`;
+          }
+        }
+
+        if (jpeg) {
+          res.writeHead(200, { "content-type": "image/jpeg", "content-length": jpeg.length });
+          return res.end(jpeg);
+        }
+        if (await servePersisted(why || "no image from the camera")) return;
+        return json(res, 404, { error: "no image available", reason: why });
       } catch (e) {
+        if (await servePersisted(`snapshot failed: ${e?.message ?? e}`)) return;
         return json(res, 502, { error: String(e?.message ?? e) });
       }
     }
@@ -109,7 +154,7 @@ export function createHttpHandler(ctx) {
           error: "stream idle-suspended — no recent detection, waiting for motion or a fresh viewer",
         });
       try {
-        const cam = await streamCameraFor(sn, cfg); // cached Device/camera on its OWN P2P client
+        const cam = await openStreamCamera(sn, cfg); // cached Device/camera on its OWN P2P client
         const source = await cam.openReadable({ objectMode: true });
         const feed = createAnnexBNormalizer();
         source.on("error", (err) => feed.destroy(err));
@@ -138,6 +183,7 @@ export function createHttpHandler(ctx) {
         source.on("close", cleanup);
         return;
       } catch (e) {
+        dropStreamCamera(sn); // never reuse a P2P client whose live open just failed
         return json(res, 502, { error: String(e?.message ?? e) });
       }
     }
