@@ -1,9 +1,9 @@
 // Write go2rtc.yaml from the live device list, so a camera appears with nobody editing YAML.
 //
 // go2rtc (bundled in the image) is the ONLY media-protocol code in this project: it pulls the bridge's
-// one HTTP Annex-B feed per camera and turns it into RTSP / WebRTC / MSE / HLS. Each camera becomes a
-// go2rtc stream sourced from `ffmpeg:<the bridge's /stream URL>#video=copy` — copy, not transcode, so
-// go2rtc only remuxes.
+// one HTTP Annex-B feed per camera and turns it into RTSP / WebRTC / MSE / HLS. go2rtc 1.9.9's native
+// HTTP/magic source recognizes Annex-B H.264 (SPS) and H.265/HEVC (VPS) directly, so no ffmpeg process
+// is needed in the live path.
 //
 // The file contains real serials, so it is gitignored and generated at startup.
 import { writeFile, mkdir } from "node:fs/promises";
@@ -27,8 +27,8 @@ export async function writeGo2rtcConfig(cfg, devices) {
     "streams:",
   ];
   for (const d of cams) {
-    // A stream id per camera serial; the source is this bridge's own HTTP feed.
-    lines.push(`  ${d.sn}: ffmpeg:http://${cfg.selfHost}:${cfg.port}/stream/${d.sn}#video=copy`);
+    // Direct HTTP Annex-B source: go2rtc auto-detects H.264 vs H.265 from the bitstream.
+    lines.push(`  ${d.sn}: http://${cfg.selfHost}:${cfg.port}/stream/${d.sn}`);
   }
   const yaml = lines.join("\n") + "\n";
   await mkdir(dirname(cfg.go2rtcConfig), { recursive: true }).catch(() => {});
