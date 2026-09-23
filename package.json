@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
-    "lint": "prettier --write src/annexb-stream.mjs test/go2rtc-config.test.mjs && echo \"---ANNEXB---\" && cat src/annexb-stream.mjs && echo \"---GO2RTC---\" && cat test/go2rtc-config.test.mjs && exit 1",
+    "lint": "prettier --check .",
     "format": "prettier --write ."
   },
   "engines": {
