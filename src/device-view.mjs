@@ -40,7 +40,9 @@ export function createDeviceView(ctx) {
 
   function enrichDeviceEvent(event, payload = {}) {
     if (event !== "armingModeChanged" || payload.mode !== undefined) return payload;
-    const mode = cachedDevice(payload.deviceSn)?.getProperty?.("armingMode")?.value;
+    const sn = payload.deviceSn ?? payload.sn;
+    const sdkMode = cachedDevice(sn)?.getProperty?.("armingMode")?.value;
+    const mode = ctx.armingModeOverride?.(sn, sdkMode) ?? sdkMode;
     return mode === undefined ? payload : { ...payload, mode };
   }
 
@@ -55,6 +57,9 @@ export function createDeviceView(ctx) {
     const dev = await deviceFor(sn);
     const m = dev.describe();
     const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
+    const state = propertyState(dev);
+    const modeOverride = ctx.armingModeOverride?.(m.sn, state.armingMode);
+    if (modeOverride !== undefined) state.armingMode = modeOverride;
     return {
       sn: m.sn,
       name: m.name, // owner's device name (e.g. "Dining room"), from device_name
@@ -62,7 +67,7 @@ export function createDeviceView(ctx) {
       modelName: m.modelName, // product display name (e.g. "Indoor Cam Pan & Tilt")
       codec: m.codec,
       capabilities: m.capabilities,
-      state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
+      state, // live property values ({ battery: 74, motion: false, … })
       stream: isCamera ? `/stream/${m.sn}` : undefined,
       streaming: isCamera ? streaming.has(m.sn) : undefined, // live P2P feed active right now?
       canReboot: m.codec === "station", // HomeBase-only; drives a Reboot button in HA

@@ -18,6 +18,7 @@ import { createState } from "./src/state.mjs";
 import { createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
+import { createArmingRealtime } from "./src/arming-realtime.mjs";
 import { createWarmup } from "./src/warmup.mjs";
 import { createStreamIdle } from "./src/stream-idle.mjs";
 import { createWatchdog } from "./src/watchdog.mjs";
@@ -54,6 +55,7 @@ const ctx = { ...config, eufy, state };
 Object.assign(
   ctx,
   createFaces(ctx),
+  createArmingRealtime(ctx),
   createDeviceView(ctx),
   createWarmup(ctx),
   createStreamIdle(ctx),
@@ -83,6 +85,10 @@ eufy.on("pushConnect", () => {
 eufy.on("pushDisconnect", () => {
   state.flags.pushConnected = false;
   state.flags.pushSince = Date.now();
+});
+// Raw push arrives before the SDK's semantic MODE_SWITCH cloud-convergence wait.
+eufy.on("push", (event) => {
+  ctx.onRawArmingPush(event);
 });
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────

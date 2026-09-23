@@ -1,6 +1,6 @@
 // Battery-saving stream lifecycle. Keep a camera's P2P live feed only while it's worth streaming: if no
-// detection arrives for cfg.streamIdleMs, tear the feed down AND suspend reopening (go2rtc's ffmpeg
-// source then retries into a 503). The suspension lifts on the next detection OR once the consumer stops
+// detection arrives for cfg.streamIdleMs, tear the feed down AND suspend reopening (go2rtc's HTTP
+// source then receives a 503 until the suspension lifts). The suspension lifts on the next detection OR once the consumer stops
 // pulling — so a stuck 24/7 consumer keeps the radio off while a viewer that returns is served at once.
 // Separately, turn a BATTERY camera's native `rtspStream` publish OFF when it's been idle, since that
 // publishes continuously and flattens the battery even when nobody consumes it.
