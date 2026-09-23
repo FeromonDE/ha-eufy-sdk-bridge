@@ -15,7 +15,10 @@ test("go2rtc consumes the normalized HTTP stream directly without ffmpeg", async
       [{ sn: "CAM1", stream: "/stream/CAM1" }],
     );
     const yaml = await readFile(file, "utf8");
-    assert.match(yaml, /CAM1: http:\/\/127\.0\.0\.1:3000\/stream\/CAM1/);
+    assert.match(
+      yaml,
+      /CAM1: http:\/\/127\.0\.0\.1:3000\/stream\/CAM1/,
+    );
     assert.doesNotMatch(yaml, /ffmpeg:/);
   } finally {
     await rm(dir, { recursive: true, force: true });
