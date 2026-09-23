@@ -30,6 +30,7 @@ RUN case "${TARGETARCH:-amd64}" in \
 
 # Install the bridge's deps from npm: the SDK (@mega-yfue/eufy-sdk → pulls mqtt/protobufjs/werift) + ws.
 COPY package.json package-lock.json ./
+COPY scripts/patch-eufy-sdk-arming.mjs ./scripts/patch-eufy-sdk-arming.mjs
 RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY server.mjs streams.mjs go2rtc-config.mjs ./
