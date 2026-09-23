@@ -57,7 +57,8 @@ export function createBoot(ctx) {
               ` → broadcast to ${clients} frontend client(s)` +
               `${clients === 0 ? " (NONE CONNECTED — HA will not update)" : ""}`,
           );
-          ctx.broadcast({ event: e, ...ctx.enrichPersonName(e, payload) });
+          const enriched = ctx.enrichDeviceEvent(e, ctx.enrichPersonName(e, payload));
+          ctx.broadcast({ event: e, ...enriched });
         });
       // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice gave
       // a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to "other"),
