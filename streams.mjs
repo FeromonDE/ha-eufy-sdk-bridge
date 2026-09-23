@@ -71,6 +71,21 @@ export async function prepareStreamClients(sns, cfg) {
   }
 }
 
+/**
+ * Forget one cached stream entry after a failed live open.
+ *
+ * A per-camera entry otherwise lives for the whole bridge process. If its P2P session wedges, every
+ * later open would reuse the same dead client until the bridge is restarted. Dropping only this camera
+ * keeps the other cached stream clients untouched; the next request rebuilds a fresh session.
+ */
+export function dropStreamClient(sn) {
+  const entry = entries.get(sn);
+  if (!entry) return false;
+  entries.delete(sn);
+  void entry.client.disconnect?.().catch(() => {}); // best-effort; the next open builds a new client
+  return true;
+}
+
 /** Tear down every stream client (on shutdown). */
 export async function closeStreamClients() {
   await Promise.all([...entries.values()].map(({ client }) => client.disconnect?.().catch(() => {})));
