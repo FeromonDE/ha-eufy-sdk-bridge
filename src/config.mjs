@@ -72,6 +72,12 @@ export function loadConfig(env = process.env) {
     // while its P2P live session is up, and go2rtc holds /stream open as long as anything consumes it —
     // so keep the feed only while detections are recent. Default 5 min; 0 disables.
     streamIdleMs: env.STREAM_IDLE_MS != null ? Number(env.STREAM_IDLE_MS) : 300_000,
+    // Camera stills. "auto" (default) takes a fresh live snapshot only from mains-powered cameras.
+    // A live snapshot wakes a battery camera's radio, while HA may refresh camera tiles repeatedly.
+    // 1 forces live snapshots everywhere; 0 disables live snapshots everywhere. In both cases the
+    // retained/persisted event thumbnail remains available as a no-wake fallback.
+    snapshotLive:
+      env.SNAPSHOT_LIVE == null || env.SNAPSHOT_LIVE === "auto" ? "auto" : truthy(env.SNAPSHOT_LIVE),
     // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
