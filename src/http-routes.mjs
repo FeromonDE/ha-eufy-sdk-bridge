@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { streamCameraFor } from "../streams.mjs";
+import { createAnnexBNormalizer } from "./annexb-stream.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -101,7 +102,7 @@ export function createHttpHandler(ctx) {
 
     if (kind === "stream" && sn) {
       if (cfg.streamIdleMs) lastPullAttempt.set(sn, Date.now()); // consumer is asking (watched vs. gone)
-      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's ffmpeg source
+      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's HTTP source
       // retries into this until a detection or the consumer giving up lifts it (see streamIdleTick).
       if (cfg.streamIdleMs && idleSuspended.has(sn))
         return json(res, 503, {
@@ -109,22 +110,32 @@ export function createHttpHandler(ctx) {
         });
       try {
         const cam = await streamCameraFor(sn, cfg); // cached Device/camera on its OWN P2P client
-        const feed = await cam.openReadable(); // node Readable of Annex-B
+        const source = await cam.openReadable({ objectMode: true });
+        const feed = createAnnexBNormalizer();
+        source.on("error", (err) => feed.destroy(err));
+        feed.on("close", () => source.destroy());
+        source.pipe(feed);
+
         if (!streaming.has(sn)) ctx.broadcast({ event: "streamState", deviceSn: sn, active: true });
         streaming.add(sn);
         activeStreams.set(sn, { feed, startedAt: Date.now() });
         rtspLastActive.set(sn, Date.now()); // a live stream counts as activity for the rtspStream auto-off
-        res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
+        res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-cache" });
         feed.pipe(res);
-        // streaming.delete returns true only on the first cleanup for this feed → broadcast "off" once.
+
+        let cleaned = false;
         const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
           feed.destroy();
+          source.destroy();
           if (streaming.delete(sn)) ctx.broadcast({ event: "streamState", deviceSn: sn, active: false });
           activeStreams.delete(sn);
         };
         req.on("close", cleanup);
         feed.on("error", cleanup);
         feed.on("close", cleanup);
+        source.on("close", cleanup);
         return;
       } catch (e) {
         return json(res, 502, { error: String(e?.message ?? e) });
