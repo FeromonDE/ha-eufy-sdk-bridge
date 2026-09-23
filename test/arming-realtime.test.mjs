@@ -103,3 +103,107 @@ test("unrelated P2P and push events are ignored", () => {
   assert.equal(guardModeFromP2PFrame("HB3", { commandId: 1152, data: Buffer.from([3]) }), undefined);
   assert.equal(guardModeFromPush({ eventType: 10, stationSn: "HB3", payload: { arming: 3 } }), undefined);
 });
+
+
+test("cloud arming propertyChanged is translated immediately and deduped", () => {
+  const sent = [];
+  const logs = [];
+  const ctx = {
+    state: { armingOverrides: new Map(), timers: { armingPoll: null } },
+    bumpActivity() {},
+    eventLog(line) {
+      logs.push(line);
+    },
+    broadcast(evt) {
+      sent.push(evt);
+    },
+  };
+  const rt = createArmingRealtime(ctx);
+
+  assert.equal(
+    rt.onCloudArmingPropertyChanged({
+      deviceSn: "HB3",
+      property: "armingMode",
+      value: 4,
+    }),
+    true,
+  );
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mode, 4);
+  assert.equal(sent[0].source, "cloud");
+  assert.match(logs[0], /propertyChanged armingMode/);
+
+  assert.equal(
+    rt.onCloudArmingPropertyChanged({
+      deviceSn: "HB3",
+      property: "armingMode",
+      value: 4,
+    }),
+    false,
+  );
+  assert.equal(sent.length, 1);
+});
+
+test("guard-mode poll targets only station devices and seeds the current mode as baseline", () => {
+  const p2p = [];
+  const reads = [];
+  const sent = [];
+  const devices = new Map([
+    [
+      "HB3",
+      {
+        getProperty(name) {
+          reads.push(["HB3", name]);
+        },
+      },
+    ],
+  ]);
+  const ctx = {
+    state: { armingOverrides: new Map(), timers: { armingPoll: null } },
+    bumpActivity() {},
+    eventLog() {},
+    broadcast(evt) {
+      sent.push(evt);
+    },
+    requestP2PArmingMode(sn) {
+      p2p.push(sn);
+    },
+    cachedDevice(sn) {
+      return devices.get(sn);
+    },
+  };
+  const rt = createArmingRealtime(ctx);
+
+  assert.equal(
+    rt.startArmingPoll([
+      { sn: "HB3", codec: "station", state: { armingMode: 1 } },
+      { sn: "CAM1", codec: "camera", state: { armingMode: 1 } },
+    ]),
+    1,
+  );
+  clearInterval(ctx.state.timers.armingPoll);
+  ctx.state.timers.armingPoll = null;
+
+  assert.deepEqual(p2p, ["HB3"]);
+  assert.deepEqual(reads, [["HB3", "armingMode"]]);
+  assert.equal(sent.length, 0);
+
+  assert.equal(
+    rt.onP2PArmingFrame("HB3", {
+      commandId: 1151,
+      data: Buffer.from([1]),
+    }),
+    false,
+  );
+  assert.equal(sent.length, 0);
+
+  assert.equal(
+    rt.onP2PArmingFrame("HB3", {
+      commandId: 1151,
+      data: Buffer.from([3]),
+    }),
+    true,
+  );
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mode, 3);
+});
