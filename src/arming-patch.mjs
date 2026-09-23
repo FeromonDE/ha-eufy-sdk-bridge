@@ -43,9 +43,7 @@ export function enableCustomArmingModes() {
     const wire = customWire(value);
     if (wire === undefined) return originalWrite(value, ctx);
     if (!ctx.accountName) {
-      throw new Error(
-        `arming: missing account identity (user_name) [serial=${ctx.serial ?? "?"}]`,
-      );
+      throw new Error(`arming: missing account identity (user_name) [serial=${ctx.serial ?? "?"}]`);
     }
     return {
       kind: "set-payload",
