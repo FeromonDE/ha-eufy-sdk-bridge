@@ -4,7 +4,7 @@
 // request handler; server.mjs wraps it in http.createServer.
 import fs from "node:fs";
 import path from "node:path";
-import { streamClientFor } from "../streams.mjs";
+import { streamCameraFor } from "../streams.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -42,7 +42,7 @@ export function createHttpHandler(ctx) {
     // A current still: a fresh live burst, falling back to the retained push thumbnail.
     if (kind === "snapshot" && sn) {
       try {
-        const cam = (await eufy.getDevice(sn)).camera?.();
+        const cam = (await ctx.deviceFor(sn)).camera?.();
         if (!cam) return json(res, 404, { error: "no camera on this device" });
         let jpeg;
         try {
@@ -66,7 +66,7 @@ export function createHttpHandler(ctx) {
       // outcome so a "Last event never updates" report shows whether HA even asked and what it got back.
       const file = path.join(eventImageDir, `last-event-${sn}.jpg`);
       try {
-        const cam = (await eufy.getDevice(sn)).camera?.();
+        const cam = (await ctx.deviceFor(sn)).camera?.();
         if (!cam?.snapshotStored) {
           ctx.eventLog(`/event-image ${sn} → 404 no camera on device`);
           return json(res, 404, { error: "no camera on this device" });
@@ -108,9 +108,7 @@ export function createHttpHandler(ctx) {
           error: "stream idle-suspended — no recent detection, waiting for motion or a fresh viewer",
         });
       try {
-        const client = await streamClientFor(sn, cfg); // its OWN P2P session — see streams.mjs
-        const cam = (await client.getDevice(sn)).camera?.();
-        if (!cam?.openReadable) return json(res, 404, { error: "no live video on this device" });
+        const cam = await streamCameraFor(sn, cfg); // cached Device/camera on its OWN P2P client
         const feed = await cam.openReadable(); // node Readable of Annex-B
         if (!streaming.has(sn)) ctx.broadcast({ event: "streamState", deviceSn: sn, active: true });
         streaming.add(sn);

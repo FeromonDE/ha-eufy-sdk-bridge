@@ -4,6 +4,7 @@
 // kicked off after `ready` so they don't hold up serving.
 import { spawn } from "node:child_process";
 import { writeGo2rtcConfig } from "../go2rtc-config.mjs";
+import { prepareStreamClients } from "../streams.mjs";
 
 export function createBoot(ctx) {
   const { cfg, eufy, DEBUG, SCHEMA_VERSION, dbg, DETECTION_EVENTS, FORWARDED_EVENTS } = ctx;
@@ -57,7 +58,8 @@ export function createBoot(ctx) {
               ` → broadcast to ${clients} frontend client(s)` +
               `${clients === 0 ? " (NONE CONNECTED — HA will not update)" : ""}`,
           );
-          ctx.broadcast({ event: e, ...ctx.enrichPersonName(e, payload) });
+          const enriched = ctx.enrichDeviceEvent(e, ctx.enrichPersonName(e, payload));
+          ctx.broadcast({ event: e, ...enriched });
         });
       // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice gave
       // a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to "other"),
@@ -65,6 +67,9 @@ export function createBoot(ctx) {
       const summaries = await ctx.deviceList();
       const cams = await writeGo2rtcConfig(cfg, summaries);
       startGo2rtc();
+      // Remove login/device-resolution work from the first viewer without waking battery cameras.
+      // autoRealtime:false stream clients stay transport-idle until /stream calls openReadable().
+      void prepareStreamClients(cams, cfg);
       flags.ready = true;
       flags.lastActivity = Date.now(); // start the liveness clock at boot, before the first poll
       timers.watchdog ??= setInterval(() => void ctx.watchdogTick(), 2 * 60_000);

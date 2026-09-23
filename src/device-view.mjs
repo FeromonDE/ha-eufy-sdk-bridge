@@ -7,6 +7,43 @@ export function createDeviceView(ctx) {
   const { eufy } = ctx;
   const { streaming } = ctx.state;
 
+  // EufyMega intentionally keeps handed-out Device objects only through WeakRef. The host must retain
+  // them if it expects realtime state (propertyChanged / refresh-backed semantic events) to keep landing.
+  // Keeping one canonical Device per serial also avoids a cloud-backed getDevice() on every host read.
+  const devices = new Map();
+  const pendingDevices = new Map();
+
+  async function deviceFor(sn) {
+    const held = devices.get(sn);
+    if (held) return held;
+    const pending = pendingDevices.get(sn);
+    if (pending) return pending;
+
+    const load = eufy
+      .getDevice(sn)
+      .then((dev) => {
+        devices.set(sn, dev);
+        pendingDevices.delete(sn);
+        return dev;
+      })
+      .catch((err) => {
+        pendingDevices.delete(sn);
+        throw err;
+      });
+    pendingDevices.set(sn, load);
+    return load;
+  }
+
+  function cachedDevice(sn) {
+    return devices.get(sn);
+  }
+
+  function enrichDeviceEvent(event, payload = {}) {
+    if (event !== "armingModeChanged" || payload.mode !== undefined) return payload;
+    const mode = cachedDevice(payload.deviceSn)?.getProperty?.("armingMode")?.value;
+    return mode === undefined ? payload : { ...payload, mode };
+  }
+
   /**
    * Build the host-facing summary of one device: identity + capabilities + a stream path for a camera.
    *
@@ -15,7 +52,7 @@ export function createDeviceView(ctx) {
    * as its model — no cross-referencing the device list.
    */
   async function describeDevice(sn) {
-    const dev = await eufy.getDevice(sn);
+    const dev = await deviceFor(sn);
     const m = dev.describe();
     const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
     return {
@@ -63,5 +100,13 @@ export function createDeviceView(ctx) {
     );
   }
 
-  return { describeDevice, propertyState, propertySpecs, deviceList };
+  return {
+    deviceFor,
+    cachedDevice,
+    enrichDeviceEvent,
+    describeDevice,
+    propertyState,
+    propertySpecs,
+    deviceList,
+  };
 }
