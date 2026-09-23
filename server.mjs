@@ -15,7 +15,7 @@ import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
 import { enableCustomArmingModes } from "./src/arming-patch.mjs";
 import { createState } from "./src/state.mjs";
-import { BRIDGE_P2P_STATION_FRAME, createEufy, requestP2PArmingMode } from "./src/client.mjs";
+import { BRIDGE_P2P_STATION_FRAME, createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
 import { createArmingRealtime } from "./src/arming-realtime.mjs";
@@ -48,7 +48,7 @@ if (!cfg.email || !cfg.password) {
 // ── assemble ctx ────────────────────────────────────────────────────────────────────────────────────
 const state = createState();
 const eufy = createEufy(config);
-const ctx = { ...config, eufy, state, requestP2PArmingMode: (sn) => requestP2PArmingMode(eufy, sn) };
+const ctx = { ...config, eufy, state };
 
 // Each factory reads its cross-module deps off ctx lazily, so this single merge is enough — nothing here
 // is called until login/handlers run, by which point ctx is complete.
