@@ -13,6 +13,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
+import { enableCustomArmingModes } from "./src/arming-patch.mjs";
 import { createState } from "./src/state.mjs";
 import { createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
@@ -25,6 +26,8 @@ import { createBoot } from "./src/boot.mjs";
 import { createHttpHandler } from "./src/http-routes.mjs";
 import { createWsServer } from "./src/ws-server.mjs";
 import { closeStreamClients } from "./streams.mjs";
+
+enableCustomArmingModes();
 
 const config = loadConfig();
 const { cfg, DEBUG, DEBUG_P2P, EVENT_LOG, eventImageDir } = config;
