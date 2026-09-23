@@ -15,7 +15,7 @@ import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
 import { enableCustomArmingModes } from "./src/arming-patch.mjs";
 import { createState } from "./src/state.mjs";
-import { BRIDGE_P2P_STATION_FRAME, createEufy } from "./src/client.mjs";
+import { BRIDGE_P2P_STATION_FRAME, createEufy, requestP2PArmingMode } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
 import { createArmingRealtime } from "./src/arming-realtime.mjs";
@@ -48,7 +48,7 @@ if (!cfg.email || !cfg.password) {
 // ── assemble ctx ────────────────────────────────────────────────────────────────────────────────────
 const state = createState();
 const eufy = createEufy(config);
-const ctx = { ...config, eufy, state };
+const ctx = { ...config, eufy, state, requestP2PArmingMode: (sn) => requestP2PArmingMode(eufy, sn) };
 
 // Each factory reads its cross-module deps off ctx lazily, so this single merge is enough — nothing here
 // is called until login/handlers run, by which point ctx is complete.
@@ -95,6 +95,10 @@ eufy.on("push", (event) => {
 eufy.on(BRIDGE_P2P_STATION_FRAME, ({ stationSn, frame }) => {
   ctx.onP2PArmingFrame(stationSn, frame);
 });
+// Targeted cloud-read fallback: Device freshness refreshes emit propertyChanged, not armingModeChanged.
+eufy.on("propertyChanged", (change) => {
+  ctx.onCloudArmingPropertyChanged(change);
+});
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────
 async function main() {
@@ -115,6 +119,7 @@ async function shutdown() {
   if (timers.watchdog) clearInterval(timers.watchdog);
   if (timers.streamIdle) clearInterval(timers.streamIdle);
   if (timers.rtspIdle) clearInterval(timers.rtspIdle);
+  if (timers.armingPoll) clearInterval(timers.armingPoll);
   flags.go2rtcProc?.kill();
   await closeStreamClients();
   await eufy.disconnect?.();
