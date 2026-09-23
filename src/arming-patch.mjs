@@ -56,8 +56,6 @@ export function enableCustomArmingModes() {
 
   observation.reflects = (value, ctx) => {
     const wire = customWire(value);
-    return wire === undefined
-      ? originalReflects(value, ctx)
-      : { param: mode.param, expected: wire };
+    return wire === undefined ? originalReflects(value, ctx) : { param: mode.param, expected: wire };
   };
 }
