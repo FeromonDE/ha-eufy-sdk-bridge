@@ -8,7 +8,7 @@ export const BRIDGE_P2P_STATION_FRAME = "bridgeP2PStationFrame";
 /**
  * Preserve the station serial on raw P2P frames.
  *
- * SDK 0.1.0 receives `onP2PFrame(stationSn, frame)` internally but publishes only `emit("p2p", frame)`,
+ * SDK 0.2.0 receives `onP2PFrame(stationSn, frame)` internally but publishes only `emit("p2p", frame)`,
  * discarding the station identity. Guard-mode cmd 1151 is station-scoped, so the bridge cannot attribute
  * it correctly (especially with multiple HomeBases) from the public event alone.
  *
