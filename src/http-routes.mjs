@@ -101,7 +101,7 @@ export function createHttpHandler(ctx) {
 
     if (kind === "stream" && sn) {
       if (cfg.streamIdleMs) lastPullAttempt.set(sn, Date.now()); // consumer is asking (watched vs. gone)
-      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's HTTP source
+      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's ffmpeg source
       // retries into this until a detection or the consumer giving up lifts it (see streamIdleTick).
       if (cfg.streamIdleMs && idleSuspended.has(sn))
         return json(res, 503, {
@@ -114,7 +114,7 @@ export function createHttpHandler(ctx) {
         streaming.add(sn);
         activeStreams.set(sn, { feed, startedAt: Date.now() });
         rtspLastActive.set(sn, Date.now()); // a live stream counts as activity for the rtspStream auto-off
-        res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-cache" });
+        res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
         feed.pipe(res);
         // streaming.delete returns true only on the first cleanup for this feed → broadcast "off" once.
         const cleanup = () => {
