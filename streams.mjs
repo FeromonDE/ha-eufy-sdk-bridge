@@ -1,42 +1,79 @@
 // Session-per-streaming-camera.
 //
-// The SDK keeps ONE P2P session per station, and the HomeBase tags every inbound media frame channel 0
-// regardless of which camera was started — so two cameras streamed through one session arrive
-// byte-identical (measured: two handles got the same frames, bitrate doubled). A separate EufyMega
-// instance per streaming camera means a separate session, which keeps them apart. Measured working:
-// five cameras concurrently, every pair byte-distinct, ~4.4 Mbps aggregate.
-//
-// These clients share the session FILE, so they hydrate the same token instead of logging in again —
-// eufy permits one active login per account, and a second login kicks the first.
-//
-// This is a workaround at the wrong layer; the right fix is session-per-stream INSIDE the SDK, after
-// which this whole file collapses to reusing the one control client.
+// Each camera gets its own EufyMega instance because HomeBase media channel attribution is not reliable
+// enough to share one media session across simultaneous cameras. These stream clients are intentionally
+// "control quiet": autoRealtime is off, so they do not open their own push/MQTT/poll background planes.
+// A client and its resolved Device/camera surface are cached per serial; none of that opens video by itself.
+// The camera wakes only when openReadable() is called by /stream/<sn>.
 import { EufyMega, FileSessionStore, LoginStatus } from "@mega-yfue/eufy-sdk";
 
-const clients = new Map(); // sn -> EufyMega
+const entries = new Map(); // sn -> { client, device, camera }
+const pending = new Map(); // sn -> Promise<entry>
 
-/** Get (or lazily create + hydrate) the dedicated stream client for a camera. */
-export async function streamClientFor(sn, cfg) {
-  let client = clients.get(sn);
-  if (client) return client;
-  client = new EufyMega({
-    email: cfg.email,
-    password: cfg.password,
-    countryCode: cfg.country,
-    store: new FileSessionStore(cfg.session), // shared session file → hydrate, no fresh login
-  });
-  client.on("error", (e) => console.error(`[bridge] stream(${sn}) sdk error: ${e?.message ?? e}`));
-  const result = await client.login();
-  if (result.status !== LoginStatus.Ok) {
-    clients.delete(sn);
-    throw new Error(`stream client for ${sn} could not hydrate session (${result.status})`);
+/** Resolve and cache one dedicated stream client + Device/camera surface without starting live media. */
+async function streamEntryFor(sn, cfg) {
+  const held = entries.get(sn);
+  if (held) return held;
+  const inFlight = pending.get(sn);
+  if (inFlight) return inFlight;
+
+  const load = (async () => {
+    const client = new EufyMega({
+      email: cfg.email,
+      password: cfg.password,
+      countryCode: cfg.country,
+      store: new FileSessionStore(cfg.session), // shared token; hydrate, do not create a second login
+      autoRealtime: false, // no second push/poll/P2P background lifecycle
+      stateSnapshotMs: 0,
+    });
+    client.on("error", (e) => console.error(`[bridge] stream(${sn}) sdk error: ${e?.message ?? e}`));
+
+    const result = await client.login();
+    if (result.status !== LoginStatus.Ok)
+      throw new Error(`stream client for ${sn} could not hydrate session (${result.status})`);
+
+    const device = await client.getDevice(sn);
+    const camera = device.camera?.();
+    if (!camera?.openReadable) {
+      await client.disconnect?.().catch(() => {});
+      throw new Error(`no live video on device ${sn}`);
+    }
+
+    const entry = { client, device, camera };
+    entries.set(sn, entry);
+    return entry;
+  })();
+
+  pending.set(sn, load);
+  try {
+    return await load;
+  } finally {
+    pending.delete(sn);
   }
-  clients.set(sn, client);
-  return client;
+}
+
+/** Return a cached camera surface; this does NOT start the video feed. */
+export async function streamCameraFor(sn, cfg) {
+  return (await streamEntryFor(sn, cfg)).camera;
+}
+
+/**
+ * Resolve stream clients for known cameras ahead of the first viewer.
+ * This hydrates login + resolves Device/camera metadata only; autoRealtime:false means no P2P session and
+ * no live feed is opened, so battery cameras stay asleep.
+ */
+export async function prepareStreamClients(sns, cfg) {
+  const settled = await Promise.allSettled(sns.map((sn) => streamEntryFor(sn, cfg)));
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    if (result.status === "rejected")
+      console.error(`[bridge] stream(${sns[i]}) prepare failed: ${result.reason?.message ?? result.reason}`);
+  }
 }
 
 /** Tear down every stream client (on shutdown). */
 export async function closeStreamClients() {
-  await Promise.all([...clients.values()].map((c) => c.disconnect?.().catch(() => {})));
-  clients.clear();
+  await Promise.all([...entries.values()].map(({ client }) => client.disconnect?.().catch(() => {})));
+  entries.clear();
+  pending.clear();
 }
