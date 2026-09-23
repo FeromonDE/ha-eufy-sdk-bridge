@@ -111,7 +111,12 @@ export function createArmingRealtime(ctx) {
   }
 
   function startArmingPoll(summaries) {
-    stationSns = (summaries ?? []).filter((d) => d?.codec === "station").map((d) => d.sn);
+    const stations = (summaries ?? []).filter((d) => d?.codec === "station");
+    stationSns = stations.map((d) => d.sn);
+    for (const station of stations) {
+      const mode = asMode(station?.state?.armingMode);
+      if (mode !== undefined) lastModes.set(station.sn, mode);
+    }
     if (!stationSns.length) return 0;
     pollArmingModes();
     if (!ctx.state.timers.armingPoll) {
