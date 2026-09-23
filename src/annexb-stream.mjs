@@ -5,14 +5,8 @@ const START4 = Buffer.from([0x00, 0x00, 0x00, 0x01]);
 /** Split one Annex-B access unit into NAL bodies, accepting 3- and 4-byte start codes. */
 export function splitAnnexBNals(buf) {
   const starts = [];
-  for (let i = 0; i < buf.length - 2; ) {
-    if (
-      i + 3 < buf.length &&
-      buf[i] === 0 &&
-      buf[i + 1] === 0 &&
-      buf[i + 2] === 0 &&
-      buf[i + 3] === 1
-    ) {
+  for (let i = 0; i < buf.length - 2;) {
+    if (i + 3 < buf.length && buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) {
       starts.push([i, 4]);
       i += 4;
     } else if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) {
