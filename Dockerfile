@@ -9,6 +9,13 @@
 # no build context, no sibling checkout. The pinned version lives in package.json; bump it there to move
 # the bridge to a newer SDK release. Build with just:
 #     docker build -t ha-eufy-sdk-bridge .
+FROM --platform=$BUILDPLATFORM node:24-alpine AS sdk-backport
+RUN apk add --no-cache git
+WORKDIR /bridge-build
+COPY scripts/build-sdk-backports.sh scripts/resolve-sdk-pr212.mjs scripts/apply-sdk-pr235.mjs ./scripts/
+RUN chmod +x ./scripts/build-sdk-backports.sh \
+ && ./scripts/build-sdk-backports.sh /tmp/eufy-sdk-backports
+
 FROM node:24-alpine
 RUN apk add --no-cache ffmpeg curl
 WORKDIR /app
@@ -31,6 +38,13 @@ RUN case "${TARGETARCH:-amd64}" in \
 # Install the bridge's deps from npm: the SDK (@mega-yfue/eufy-sdk → pulls mqtt/protobufjs/werift) + ws.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
+
+# Keep npm dependency metadata pinned to official eufy-sdk 0.2.0, but replace only
+# its compiled dist/ with the reviewed P2P/push backports built above.
+COPY --from=sdk-backport /tmp/eufy-sdk-backports/dist /tmp/eufy-sdk-dist
+RUN rm -rf node_modules/@mega-yfue/eufy-sdk/dist \
+ && cp -R /tmp/eufy-sdk-dist node_modules/@mega-yfue/eufy-sdk/dist \
+ && rm -rf /tmp/eufy-sdk-dist
 
 COPY server.mjs streams.mjs go2rtc-config.mjs ./
 COPY src ./src
