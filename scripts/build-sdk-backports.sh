@@ -58,7 +58,16 @@ merge_pr() {
 # of relying on a conflict-prone merge.
 merge_pr 180
 merge_pr 211
-merge_pr 212
+
+# PR #212 and #211 both insert constants next to STALE_RETRANSMIT_DEPTH.
+# Resolve only that reviewed overlap; fail if Git reports anything else.
+if ! git merge -q --no-ff --no-edit "refs/remotes/origin/pr-212"; then
+  node "$SCRIPT_DIR/resolve-sdk-pr212.mjs" "$DEST"
+  git add src/transport/p2p/p2p-session.ts src/transport/p2p/__tests__/data-reassembly.spec.ts
+  git diff --cached --check
+  git commit -q --no-edit
+fi
+
 merge_pr 234
 
 node "$SCRIPT_DIR/apply-sdk-pr235.mjs" "$DEST"
