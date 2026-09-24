@@ -32,3 +32,20 @@ jobs:
           for f in $(git ls-files '*.mjs'); do node --check "$f"; done
       - name: Test
         run: npm test
+
+
+  sdk-backports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Verify patched eufy-sdk
+        env:
+          SDK_BACKPORT_VERIFY: "1"
+        run: |
+          chmod +x scripts/build-sdk-backports.sh
+          scripts/build-sdk-backports.sh "$RUNNER_TEMP/eufy-sdk-backports"
+      - name: Build bridge image
+        run: docker build --progress=plain -t ha-eufy-sdk-bridge:pr .
