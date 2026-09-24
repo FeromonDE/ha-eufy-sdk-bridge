@@ -12,7 +12,7 @@
 FROM --platform=$BUILDPLATFORM node:24-alpine AS sdk-backport
 RUN apk add --no-cache git
 WORKDIR /bridge-build
-COPY scripts/build-sdk-backports.sh scripts/apply-sdk-pr235.mjs ./scripts/
+COPY scripts/build-sdk-backports.sh scripts/resolve-sdk-pr212.mjs scripts/apply-sdk-pr235.mjs ./scripts/
 RUN chmod +x ./scripts/build-sdk-backports.sh \
  && ./scripts/build-sdk-backports.sh /tmp/eufy-sdk-backports
 
