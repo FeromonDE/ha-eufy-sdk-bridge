@@ -45,7 +45,12 @@ git config user.email "backport-builder@localhost"
 
 merge_pr() {
   number="$1"
-  git merge -q --no-ff --no-edit "refs/remotes/origin/pr-$number"
+  if ! git merge -q --no-ff --no-edit "refs/remotes/origin/pr-$number"; then
+    echo "SDK backport merge failed for PR #$number" >&2
+    git status --short >&2 || true
+    git diff -- src/transport/p2p/p2p-session.ts >&2 || true
+    exit 1
+  fi
 }
 
 # These four branches merge cleanly onto stable 0.2.0. PR #235 overlaps #211 in
