@@ -13,3 +13,9 @@ test("BRIDGE_PREWARM=1 turns pre-warm on (SDK default events)", () => {
   assert.equal(loadConfig({ ...base, BRIDGE_PREWARM: "true" }).cfg.prewarm, true);
   assert.equal(loadConfig({ ...base, BRIDGE_PREWARM: "0" }).cfg.prewarm, false);
 });
+
+test("EUFY_ACCOUNT_NAME overrides command attribution name", () => {
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "Home Assistant" }).cfg.accountName, "Home Assistant");
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "  Home Assistant  " }).cfg.accountName, "Home Assistant");
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "   " }).cfg.accountName, undefined);
+});
