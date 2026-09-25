@@ -31,6 +31,7 @@ export function createEufy({ cfg, DEBUG_P2P }) {
     email: cfg.email,
     password: cfg.password,
     countryCode: cfg.country,
+    accountName: cfg.accountName,
     store: new FileSessionStore(cfg.session),
     pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
     // Event pre-warm is OFF by default (`[]` = no event opens P2P speculatively) so a battery camera's
