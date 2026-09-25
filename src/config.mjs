@@ -61,6 +61,9 @@ export function loadConfig(env = process.env) {
     email: env.EUFY_EMAIL,
     password: env.EUFY_PASSWORD,
     country: env.EUFY_COUNTRY || "GB",
+    // Acting name written into Eufy's command attribution (e.g. "who changed guard mode").
+    // Unset → SDK falls back to the login email's local-part.
+    accountName: env.EUFY_ACCOUNT_NAME?.trim() || undefined,
     host: env.BRIDGE_HOST || "0.0.0.0",
     port: Number(env.BRIDGE_PORT || 3000),
     session: env.EUFY_SESSION || "./data/.eufy-session.json",
