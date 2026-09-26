@@ -32,3 +32,5 @@ jobs:
           for f in $(git ls-files '*.mjs'); do node --check "$f"; done
       - name: Test
         run: npm test
+      - name: Build Docker image
+        run: docker build --progress=plain -t ha-eufy-sdk-bridge:pr .
