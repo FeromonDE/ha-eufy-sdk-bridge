@@ -4,23 +4,25 @@
 // through — returned so server.mjs can hang them on ctx for auth.mjs / boot.mjs / http-routes.mjs.
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
-
+import { SOLIX_CONTROLS, SOLIX_DISABLED } from "./solix.mjs";
 
 /**
  * Arming writes use the bound arming capability directly. This avoids the generic property path's
- * cloud lookup before the P2P write; HA state is still non-optimistic and changes only on a real event/readback.
+ * cloud lookup before the P2P write; HA state is still non-optimistic and changes only on a real
+ * event/readback.
  */
 export async function setDeviceProperty(ctx, sn, name, value) {
   if (name === "armingMode") {
     const dev = await ctx.eufy.getDevice(sn);
     const arming = dev.arming?.();
-    if (!arming || typeof arming.setMode !== "function") throw new Error(`no arming control on ${sn}`);
+    if (!arming || typeof arming.setMode !== "function") {
+      throw new Error(`no arming control on ${sn}`);
+    }
     await arming.setMode(value);
     return;
   }
   await ctx.eufy.setProperty(sn, name, value);
 }
-import { SOLIX_CONTROLS, SOLIX_DISABLED } from "./solix.mjs";
 
 // Commands that require an authenticated eufy session — gated in one place before dispatch. (auth.* and
 // solix.* run before this gate, so a client can drive 2FA/captcha and Solix while eufy is still pending.)
