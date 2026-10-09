@@ -23,7 +23,10 @@ jobs:
         run: npm ci
       # lint: formatting is enforced, not debated.
       - name: Lint (Prettier)
-        run: npm run lint
+        run: |
+          npx prettier --write test/snapshot-fallback.test.mjs test/stream-lifecycle.test.mjs
+          git diff -- test/snapshot-fallback.test.mjs test/stream-lifecycle.test.mjs
+          exit 1
       # compile: the bridge is ESM (no tsc), so syntax-check every module — catches parse/typo errors
       # a plain `require` at runtime would only hit lazily.
       - name: Compile (ESM syntax-check)
