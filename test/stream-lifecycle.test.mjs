@@ -1,11 +1,10 @@
 // /stream request lifecycle, driven over a real loopback HTTP connection.
 //
 // - A feed that fails (P2P drop, warm-up timeout) must take the HTTP response down with it. pipe() only
-//   ends the response on a clean end, so without that ffmpeg sits on an open, silent socket until its own
-//   timeout and go2rtc reconnects late.
+//   ends the response on a clean end, so without that go2rtc sits on an open, silent socket and reconnects late.
 // - A viewer that leaves while the session is still opening must not leave a feed behind that nobody
 //   reads: it would hold the camera's live source open and report the camera as streaming.
-// - Requests for one camera overlap briefly when ffmpeg reconnects before the old connection has closed.
+// - Requests for one camera can overlap briefly when go2rtc reconnects before the old connection has closed.
 //   Each must release only its own registration, or the camera reads as idle while it streams.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +17,15 @@ import { createStreamIdle } from "../src/stream-idle.mjs";
 
 process.env.BRIDGE_STREAM_CONSUMER_LOG_MS = "0"; // no real HTTP at :1984 from the consumer probe
 const { createHttpHandler } = await import("../src/http-routes.mjs");
+
+
+const KEYFRAME = Buffer.from([
+  0, 0, 0, 1, 0x67, 0x01,
+  0, 0, 0, 1, 0x68, 0x02,
+  0, 0, 0, 1, 0x65, 0x03,
+]);
+
+const videoFrame = () => ({ data: KEYFRAME, codec: "h264", keyframe: true });
 
 /** Resolves once `cond()` holds, polling the event loop (fails the test after ~2s). */
 async function until(cond, what) {
@@ -59,7 +67,7 @@ async function setup() {
             t.opens++;
             if (t.gate) await t.gate;
             if (t.openError) throw t.openError;
-            const feed = new PassThrough();
+            const feed = new PassThrough({ objectMode: true });
             t.feeds.push(feed);
             return feed;
           },
@@ -122,12 +130,11 @@ test("a clean end of the feed ends the response with every byte (control case)",
   try {
     const p = pull(t);
     await until(() => t.feeds.length === 1, "feed opened");
-    t.feeds[0].write(Buffer.alloc(1000));
-    t.feeds[0].end(Buffer.alloc(500));
+    t.feeds[0].end(videoFrame());
     const out = await settled(p);
     assert.equal(out.status, 200);
     assert.equal(out.ended, true);
-    assert.equal(out.bytes, 1500);
+    assert.equal(out.bytes, KEYFRAME.length);
     await until(() => !t.state.streaming.has("CAM1"), "streaming cleared");
     assert.equal(t.state.activeStreams.has("CAM1"), false);
   } finally {
@@ -140,8 +147,8 @@ test("a feed that fails mid-stream aborts the response instead of leaving it ope
   try {
     const p = pull(t);
     await until(() => t.feeds.length === 1, "feed opened");
-    t.feeds[0].write(Buffer.alloc(1000));
-    await until(() => p.bytes === 1000, "first bytes delivered");
+    t.feeds[0].write(videoFrame());
+    await until(() => p.bytes === KEYFRAME.length, "first bytes delivered");
     t.feeds[0].destroy(new Error("P2P session lost"));
     const out = await settled(p);
     assert.notEqual(out.timedOut, true, "response left open on a silent socket");
@@ -160,8 +167,8 @@ test("a feed that closes before its end aborts the response too", async () => {
   try {
     const p = pull(t);
     await until(() => t.feeds.length === 1, "feed opened");
-    t.feeds[0].write(Buffer.alloc(100));
-    await until(() => p.bytes === 100, "first bytes delivered");
+    t.feeds[0].write(videoFrame());
+    await until(() => p.bytes === KEYFRAME.length, "first bytes delivered");
     t.feeds[0].destroy(); // no error, no end — e.g. the consumer was detached underneath us
     const out = await settled(p);
     assert.notEqual(out.timedOut, true, "response left open on a silent socket");
@@ -179,7 +186,7 @@ test("a viewer that leaves while the feed is opening leaves no feed behind", asy
     t.gate = new Promise((r) => (release = r));
     const p = pull(t);
     await until(() => t.opens === 1, "open in progress");
-    p.req.destroy(); // ffmpeg gives up while the P2P session is still connecting
+    p.req.destroy(); // go2rtc gives up while the P2P session is still connecting
     await settled(p);
     await new Promise((r) => setTimeout(r, 30)); // let the server see the disconnect
     release();
@@ -237,13 +244,16 @@ test("overlapping requests: the older one closing does not unregister the newer 
   try {
     const a = pull(t);
     await until(() => t.feeds.length === 1, "A opened");
-    const b = pull(t); // ffmpeg reconnects before A's connection has gone
+    const entryA = t.state.activeStreams.get("CAM1");
+    const b = pull(t); // go2rtc reconnects before A's connection has gone
     await until(() => t.feeds.length === 2, "B opened");
+    const entryB = t.state.activeStreams.get("CAM1");
+    assert.notEqual(entryA, entryB);
     a.req.destroy();
     await settled(a);
     await until(() => t.feeds[0].destroyed, "A released");
     assert.equal(t.state.streaming.has("CAM1"), true, "B is still streaming");
-    assert.equal(t.state.activeStreams.get("CAM1")?.feed, t.feeds[1]);
+    assert.equal(t.state.activeStreams.get("CAM1"), entryB);
     assert.equal(inactive(t).length, 0, "no 'stopped' while B streams");
 
     b.req.destroy();
@@ -261,13 +271,16 @@ test("overlapping requests: the newer one closing first keeps the older one regi
   try {
     const a = pull(t);
     await until(() => t.feeds.length === 1, "A opened");
+    const entryA = t.state.activeStreams.get("CAM1");
     const b = pull(t);
     await until(() => t.feeds.length === 2, "B opened");
+    const entryB = t.state.activeStreams.get("CAM1");
+    assert.notEqual(entryA, entryB);
     b.req.destroy();
     await settled(b);
     await until(() => t.feeds[1].destroyed, "B released");
     assert.equal(t.state.streaming.has("CAM1"), true, "A is still streaming");
-    assert.equal(t.state.activeStreams.get("CAM1")?.feed, t.feeds[0], "the idle sweep must still see A");
+    assert.equal(t.state.activeStreams.get("CAM1"), entryA, "the idle sweep must still see A");
     assert.equal(inactive(t).length, 0);
 
     a.req.destroy();
@@ -284,7 +297,7 @@ test("the idle sweep closes every open request for the camera, not only the one 
   try {
     const a = pull(t);
     await until(() => t.feeds.length === 1, "A opened");
-    const b = pull(t); // ffmpeg reconnected before A's connection went
+    const b = pull(t); // go2rtc reconnected before A's connection went
     await until(() => t.feeds.length === 2, "B opened");
     const idle = createStreamIdle({ cfg: { streamIdleMs: 1 }, state: t.state, SUSPEND_RELEASE_MS: 60_000 });
     await new Promise((r) => setTimeout(r, 5)); // both older than the idle window
