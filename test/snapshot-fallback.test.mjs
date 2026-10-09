@@ -331,24 +331,15 @@ test("snapshot: sequential modes remain request-local", async () => {
   assert.deepEqual(calls, { live: 1, stored: 1 });
 });
 
-test("snapshot: serves the last live picture when it is newer than the last event", async () => {
+test("snapshot: ignores old last-live files from previous FFmpeg builds", async () => {
   const { handler, calls, dir } = setup({ live: "throw", stored: "throw", battery: true });
-  const live = path.join(dir, "last-live-CAM1.jpg");
-  fs.writeFileSync(live, Buffer.from("LIVEFRAME"));
-  const past = new Date(Date.now() - 3_600_000); // the event was an hour ago
+  const oldLive = path.join(dir, "last-live-CAM1.jpg");
+  fs.writeFileSync(oldLive, Buffer.from("OLD-LIVE-FRAME"));
+  const past = new Date(Date.now() - 3_600_000);
   fs.utimesSync(path.join(dir, "last-event-CAM1.jpg"), past, past);
   const out = await get(handler);
   assert.equal(out.code, 200);
-  assert.equal(out.body.toString(), "LIVEFRAME");
-  assert.equal(calls.live, 0); // still never woke the battery-capable camera
+  assert.deepEqual(out.body, JPEG);
+  assert.equal(calls.live, 0);
 });
 
-test("snapshot: a newer event thumbnail wins over an older live picture", async () => {
-  const { handler, dir } = setup({ live: "throw", stored: "throw", battery: true });
-  const live = path.join(dir, "last-live-CAM1.jpg");
-  fs.writeFileSync(live, Buffer.from("LIVEFRAME"));
-  const past = new Date(Date.now() - 3_600_000); // someone watched an hour ago, the event is fresh
-  fs.utimesSync(live, past, past);
-  const out = await get(handler);
-  assert.deepEqual(out.body, JPEG);
-});
