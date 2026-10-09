@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { streamClientFor, dropStreamClient, isSupersededStreamClient } from "../streams.mjs";
-import { createLiveStillTap } from "./live-still.mjs";
+import { createAnnexBNormalizer } from "./annexb-stream.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -42,7 +42,7 @@ export function createHttpHandler(ctx) {
 
   // Ask go2rtc who is CONSUMING a stream (its remote address / user-agent / protocol) and log each — so
   // a stream that keeps opening "by itself" can be traced to the real viewer (an HA card, a recording,
-  // a WebRTC/HLS client) rather than the go2rtc ffmpeg the bridge sees. Best-effort: on any error (go2rtc
+  // a WebRTC/HLS client) rather than the local go2rtc source the bridge sees. Best-effort: on any error (go2rtc
   // disabled / not ready) the immediate-requester line already logged is the fallback.
   const lastConsumerLog = new Map(); // sn -> ts of the last probe
   async function logStreamConsumers(sn) {
@@ -68,7 +68,7 @@ export function createHttpHandler(ctx) {
     }
   }
 
-  // Log every /stream request's IMMEDIATE requester (IP + UA). Normally that's go2rtc's own ffmpeg on
+  // Log every /stream request's IMMEDIATE requester (IP + UA). Normally that's the local go2rtc process on
   // localhost; anything else means something is pulling the bridge feed directly — itself a finding.
   // Then (throttled) ask go2rtc who the real consumer is.
   function noteStreamRequest(sn, req) {
@@ -115,12 +115,9 @@ export function createHttpHandler(ctx) {
         return json(res, 400, { error: "invalid snapshot mode", mode: snapshotMode });
       }
 
-      // Two pictures can sit on disk: the last event's thumbnail, and the last frame of a stream someone
-      // watched (live-still.mjs). Either may be the more recent one, so serve whichever is newer.
-      const candidates = [
-        { file: path.join(eventImageDir, `last-live-${sn}.jpg`), label: "last live picture" },
-        { file: path.join(eventImageDir, `last-event-${sn}.jpg`), label: "last event thumbnail" },
-      ];
+      // This fork does not extract JPEGs from live video with ffmpeg. Persisted fallback is therefore
+      // only the last event thumbnail; an old last-live file from a previous image must never win.
+      const candidates = [{ file: path.join(eventImageDir, `last-event-${sn}.jpg`), label: "last event thumbnail" }];
       /** Serve the newest persisted picture. Instant, and it never touches the camera. */
       const servePersisted = async (why) => {
         try {
@@ -273,13 +270,13 @@ export function createHttpHandler(ctx) {
     if (kind === "stream" && sn) {
       noteStreamRequest(sn, req); // trace who is pulling this stream (incl. go2rtc's real consumers)
       if (cfg.streamIdleMs) lastPullAttempt.set(sn, Date.now()); // consumer is asking (watched vs. gone)
-      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's ffmpeg source
+      // Idle-suspended: no detection recently, so don't reopen the P2P session. go2rtc's source
       // retries into this until a detection or the consumer giving up lifts it (see streamIdleTick).
       if (cfg.streamIdleMs && idleSuspended.has(sn))
         return json(res, 503, {
           error: "stream idle-suspended — no recent detection, waiting for motion or a fresh viewer",
         });
-      // Failure-backoff: a recent open failed (P2P unreachable), and go2rtc retries every ~30s. Serve a
+      // Failure-backoff: a recent open failed (P2P unreachable), and go2rtc may retry on a short loop. Serve a
       // fast 503 without opening a P2P session, so a camera that can't connect isn't woken on every retry.
       const backoff = ctx.streamBackoffMs?.(sn) ?? 0;
       if (backoff > 0)
@@ -305,7 +302,14 @@ export function createHttpHandler(ctx) {
         // The battery budget only takes effect when this call opens the session, which it does: the stream
         // client is dedicated to /stream (stills go through the control client), so nothing opens it first.
         const budget = cfg.streamBatteryBudgetMs;
-        const feed = await cam.openReadable(budget ? { batteryBudgetMs: budget } : undefined); // Annex-B
+        const source = await cam.openReadable({
+          objectMode: true,
+          ...(budget ? { batteryBudgetMs: budget } : {}),
+        });
+        const feed = createAnnexBNormalizer();
+        source.on("error", (err) => feed.destroy(err));
+        feed.on("close", () => source.destroy());
+        source.pipe(feed);
         res.off("close", onGone);
         ctx.noteStreamOpened?.(sn); // reachable again → clear any failure backoff
         if (gone) {
@@ -321,21 +325,17 @@ export function createHttpHandler(ctx) {
         streaming.add(sn);
         activeStreams.set(sn, entry);
         rtspLastActive.set(sn, Date.now()); // a live stream counts as activity for the rtspStream auto-off
-        res.writeHead(200, { "content-type": "video/H264", "cache-control": "no-cache" });
+        res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-cache" });
         feed.pipe(res);
-        // Remember the stream's latest keyframe so the still can show what was last SEEN, not only the
-        // last event — without ever waking the camera for it (see live-still.mjs).
-        const still = createLiveStillTap({ sn, dir: eventImageDir, log: ctx.eventLog ?? (() => {}) });
-        feed.on("data", still.onChunk);
         let cleanedUp = false;
         const cleanup = () => {
           if (cleanedUp) return;
           cleanedUp = true;
-          void still.flush();
           feed.destroy();
+          source.destroy();
           // pipe() ends the response only on a clean end. A feed that failed (P2P drop, warm-up timeout) or
-          // closed early would leave ffmpeg on an open, silent socket until its own timeout — abort the
-          // response instead, so go2rtc reconnects right away.
+          // closed early would leave the media consumer on an open, silent socket — abort the response so
+          // go2rtc reconnects right away.
           if (!feed.readableEnded) res.destroy();
           feeds.delete(entry);
           if (dropWhenIdle.has(lease) && ![...feeds].some((other) => other.lease === lease)) {
