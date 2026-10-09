@@ -106,7 +106,8 @@ export function createBoot(ctx) {
                 `${clients === 0 ? " (NONE CONNECTED — HA will not update)" : ""}`,
             );
           }
-          const enriched = ctx.enrichDeviceEvent?.(e, ctx.enrichPersonName(e, payload)) ?? ctx.enrichPersonName(e, payload);
+          const enriched =
+            ctx.enrichDeviceEvent?.(e, ctx.enrichPersonName(e, payload)) ?? ctx.enrichPersonName(e, payload);
           ctx.broadcast({ event: e, ...enriched });
         });
       // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice gave
