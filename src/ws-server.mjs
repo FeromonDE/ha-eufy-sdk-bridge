@@ -4,6 +4,22 @@
 // through — returned so server.mjs can hang them on ctx for auth.mjs / boot.mjs / http-routes.mjs.
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
+
+
+/**
+ * Arming writes use the bound arming capability directly. This avoids the generic property path's
+ * cloud lookup before the P2P write; HA state is still non-optimistic and changes only on a real event/readback.
+ */
+export async function setDeviceProperty(ctx, sn, name, value) {
+  if (name === "armingMode") {
+    const dev = await ctx.eufy.getDevice(sn);
+    const arming = dev.arming?.();
+    if (!arming || typeof arming.setMode !== "function") throw new Error(`no arming control on ${sn}`);
+    await arming.setMode(value);
+    return;
+  }
+  await ctx.eufy.setProperty(sn, name, value);
+}
 import { SOLIX_CONTROLS, SOLIX_DISABLED } from "./solix.mjs";
 
 // Commands that require an authenticated eufy session — gated in one place before dispatch. (auth.* and
@@ -132,7 +148,7 @@ export function createWsServer(ctx, httpServer) {
           const t0 = Date.now();
           dbg(`device.set → setProperty sn=${msg.sn} name=${msg.name} value=${JSON.stringify(msg.value)}`);
           try {
-            await eufy.setProperty(msg.sn, msg.name, msg.value);
+            await setDeviceProperty(ctx, msg.sn, msg.name, msg.value);
             dbg(`device.set OK sn=${msg.sn} name=${msg.name} (${Date.now() - t0}ms)`);
           } catch (e) {
             console.error(
