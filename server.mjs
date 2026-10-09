@@ -15,9 +15,10 @@ import http from "node:http";
 import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
 import { createState } from "./src/state.mjs";
-import { createEufy } from "./src/client.mjs";
+import { BRIDGE_P2P_STATION_FRAME, createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
+import { createArmingRealtime } from "./src/arming-realtime.mjs";
 import { createWarmup } from "./src/warmup.mjs";
 import { createStreamIdle } from "./src/stream-idle.mjs";
 import { createWatchdog } from "./src/watchdog.mjs";
@@ -54,6 +55,7 @@ const ctx = { ...config, eufy, state };
 Object.assign(
   ctx,
   createFaces(ctx),
+  createArmingRealtime(ctx),
   createDeviceView(ctx),
   createWarmup(ctx),
   createStreamIdle(ctx),
@@ -83,6 +85,17 @@ eufy.on("pushConnect", () => {
 eufy.on("pushDisconnect", () => {
   state.flags.pushConnected = false;
   state.flags.pushSince = Date.now();
+});
+
+// Guard-mode fast paths: raw push and station-scoped P2P 1151 beat the slower cloud/device refresh.
+eufy.on("push", (event) => {
+  ctx.onRawArmingPush?.(event);
+});
+eufy.on(BRIDGE_P2P_STATION_FRAME, ({ stationSn, frame }) => {
+  ctx.onP2PArmingFrame?.(stationSn, frame);
+});
+eufy.on("propertyChanged", (change) => {
+  ctx.onCloudArmingPropertyChanged?.(change);
 });
 
 // eufy answers a wrong country with the same `200/26108 Email address or password incorrect`
@@ -121,6 +134,7 @@ async function shutdown() {
   if (timers.watchdog) clearInterval(timers.watchdog);
   if (timers.streamIdle) clearInterval(timers.streamIdle);
   if (timers.rtspIdle) clearInterval(timers.rtspIdle);
+  if (timers.armingPoll) clearInterval(timers.armingPoll);
   flags.go2rtcProc?.kill();
   await closeStreamClients();
   await ctx.stopSolix?.();
