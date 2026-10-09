@@ -1,9 +1,7 @@
 // Write go2rtc.yaml from the live device list, so a camera appears with nobody editing YAML.
 //
-// go2rtc (bundled in the image) is the ONLY media-protocol code in this project: it pulls the bridge's
-// one HTTP Annex-B feed per camera and turns it into RTSP / WebRTC / MSE / HLS. Each camera becomes a
-// go2rtc stream sourced from `ffmpeg:<the bridge's /stream URL>#video=copy` — copy, not transcode, so
-// go2rtc only remuxes.
+// go2rtc pulls the bridge's normalized Annex-B feed directly and turns it into RTSP / WebRTC / MSE / HLS.
+// No ffmpeg wrapper is used: /stream emits decoder-ready Annex-B with stable four-byte start codes.
 //
 // The file contains real serials, so it is gitignored and generated at startup.
 import { writeFile, mkdir } from "node:fs/promises";
@@ -27,13 +25,8 @@ export async function writeGo2rtcConfig(cfg, devices) {
     "streams:",
   ];
   for (const d of cams) {
-    // A stream id per camera serial; the source is this bridge's own HTTP feed.
-    // `#async` makes ffmpeg stamp frames from the wall clock (-use_wallclock_as_timestamps 1 -async 1)
-    // instead of trusting the camera's. The eufy feed starts at dts 0 and then jumps, which a consumer
-    // reads as a broken stream: Home Assistant aborts with "Timestamp discontinuity detected: last dts =
-    // 0, dts = 4219155056" seconds after the picture starts flowing. Re-stamping costs nothing here —
-    // the feed is remuxed, not transcoded, and a live view has no timeline to preserve.
-    lines.push(`  ${d.sn}: ffmpeg:http://${cfg.selfHost}:${cfg.port}/stream/${d.sn}#video=copy#async`);
+    // Direct HTTP source; /stream normalizes frame objects into decoder-ready Annex-B.
+    lines.push(`  ${d.sn}: http://${cfg.selfHost}:${cfg.port}/stream/${d.sn}`);
   }
   const yaml = lines.join("\n") + "\n";
   await mkdir(dirname(cfg.go2rtcConfig), { recursive: true }).catch(() => {});
