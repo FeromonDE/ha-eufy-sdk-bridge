@@ -61,7 +61,7 @@ export function createArmingRealtime(ctx) {
     if (lastModes.get(update.deviceSn) === update.mode) return false;
     lastModes.set(update.deviceSn, update.mode);
     overrides.set(update.deviceSn, { mode: update.mode, at: Date.now() });
-    ctx.bumpActivity();
+    ctx.bumpActivity?.();
     ctx.eventLog(`${detail} sn=${update.deviceSn} mode=${update.mode} -> HA`);
     ctx.broadcast({
       event: "armingModeChanged",

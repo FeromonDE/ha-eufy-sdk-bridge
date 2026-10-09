@@ -18,8 +18,28 @@ import { createHttpHandler } from "../src/http-routes.mjs";
 import { createWsServer } from "../src/ws-server.mjs";
 
 function fakeEufy() {
-  let getDeviceCalls = 0;
-  let armingMode = 0;
+  // Mirrors the SDK's `ptz` surface: bare no-arg movement verbs, plus a `preset()` member that
+  // ANSWERS — it hands back the sub-API namespace without acting. Those are the two shapes
+  // `device.action` has to route, so the fake carries both and records what it was asked to do.
+  const ptzCalls = [];
+  const ptzSurface = {
+    left: async () => void ptzCalls.push(["left"]),
+    right: async () => void ptzCalls.push(["right"]),
+    up: async () => void ptzCalls.push(["up"]),
+    down: async () => void ptzCalls.push(["down"]),
+    preset: () => ({
+      goto: async (id) => void ptzCalls.push(["preset.goto", id]),
+      save: async (id) => void ptzCalls.push(["preset.save", id]),
+    }),
+  };
+  // Mirrors the SDK's `siren` surface on a verified alarm-output device: `trigger(seconds)` and
+  // `stop()`. Both ANSWER nothing — they are fire-and-forget dispatches — so the fake records what it
+  // was asked to do, which is what the `device.action` routing test asserts on.
+  const sirenCalls = [];
+  const sirenSurface = {
+    trigger: async (seconds) => void sirenCalls.push(["trigger", seconds]),
+    stop: async () => void sirenCalls.push(["stop"]),
+  };
   const devices = {
     CAM1: {
       describe: () => ({
@@ -32,17 +52,29 @@ function fakeEufy() {
       }),
       getProperties: () => ({ battery: { value: 74 }, motion: { value: false } }),
     },
-    HOMEBASE1: {
+    PTCAM1: {
       describe: () => ({
-        sn: "HOMEBASE1",
-        name: "HomeBase",
-        model: "T8030",
-        modelName: "HomeBase 3",
-        codec: "station",
-        capabilities: ["arming"],
+        sn: "PTCAM1",
+        name: "Pan cam",
+        model: "T8410",
+        modelName: "Indoor Cam Pan & Tilt",
+        codec: "camera",
+        capabilities: ["camera", "video", "ptz"],
       }),
-      getProperties: () => ({ armingMode: { value: armingMode } }),
-      getProperty: (name) => (name === "armingMode" ? { value: armingMode } : undefined),
+      getProperties: () => ({ battery: { value: 50 } }),
+      ptz: () => ptzSurface,
+    },
+    SIRENCAM1: {
+      describe: () => ({
+        sn: "SIRENCAM1",
+        name: "Siren cam",
+        model: "T8114",
+        modelName: "eufyCam",
+        codec: "camera",
+        capabilities: ["camera", "video", "siren"],
+      }),
+      getProperties: () => ({ battery: { value: 61 } }),
+      siren: () => sirenSurface,
     },
     SENSOR1: {
       describe: () => ({
@@ -57,21 +89,16 @@ function fakeEufy() {
     },
   };
   return {
+    ptzCalls, // what the fake ptz surface was asked to do, for the device.action test
+    sirenCalls, // what the fake siren surface was asked to do, for the device.action test
     pollIntervalMs: 600000,
     async getDevices() {
-      return [{ sn: "CAM1" }, { sn: "HOMEBASE1" }, { sn: "SENSOR1" }];
+      return [{ sn: "CAM1" }, { sn: "PTCAM1" }, { sn: "SIRENCAM1" }, { sn: "SENSOR1" }];
     },
     async getDevice(sn) {
-      getDeviceCalls++;
       const d = devices[sn];
       if (!d) throw new Error(`no device ${sn}`);
       return d;
-    },
-    setArmingMode(mode) {
-      armingMode = mode;
-    },
-    getDeviceCalls() {
-      return getDeviceCalls;
     },
     setPollInterval(ms) {
       this.pollIntervalMs = ms;
@@ -114,36 +141,12 @@ test("device view: describe shape + camera vs sensor", async () => {
   const list = await ctx.deviceList();
   const cam = list.find((d) => d.sn === "CAM1");
   const sensor = list.find((d) => d.sn === "SENSOR1");
-  assert.equal(list.length, 3);
+  assert.equal(list.length, 4); // CAM1, PTCAM1, SIRENCAM1, SENSOR1
   assert.equal(cam.stream, "/stream/CAM1");
   assert.equal(cam.streaming, false); // nothing piping
   assert.equal(cam.canReboot, false);
   assert.deepEqual(cam.state, { battery: 74, motion: false });
   assert.equal(sensor.stream, undefined); // not a camera
-  httpServer.close();
-});
-
-test("device view retains Device and enriches repeated arming events from live state", async () => {
-  const { ctx, httpServer } = buildCtx();
-
-  await ctx.describeDevice("HOMEBASE1");
-  assert.equal(ctx.eufy.getDeviceCalls(), 1);
-
-  ctx.eufy.setArmingMode(3);
-  assert.deepEqual(ctx.enrichDeviceEvent("armingModeChanged", { deviceSn: "HOMEBASE1" }), {
-    deviceSn: "HOMEBASE1",
-    mode: 3,
-  });
-
-  ctx.eufy.setArmingMode(5);
-  assert.deepEqual(ctx.enrichDeviceEvent("armingModeChanged", { deviceSn: "HOMEBASE1" }), {
-    deviceSn: "HOMEBASE1",
-    mode: 5,
-  });
-
-  // Re-describing the same serial must reuse the strongly-held Device instead of creating a new one.
-  await ctx.describeDevice("HOMEBASE1");
-  assert.equal(ctx.eufy.getDeviceCalls(), 1);
   httpServer.close();
 });
 
@@ -178,8 +181,31 @@ test("ws: auth.status, unknown cmd, and the auth gate", async () => {
   state.flags.ready = true;
   const listed = await wsCall(ctx, { id: 4, cmd: "devices.list" });
   assert.equal(listed[0].ok, true);
-  assert.equal(listed[0].devices.length, 3);
+  assert.equal(listed[0].devices.length, 4);
   assert.deepEqual((await wsCall(ctx, { id: 5, cmd: "config.get" }))[0], { id: 5, ok: true, pollMs: 600000 });
+  httpServer.close();
+});
+
+test("device.action: routes siren trigger/stop, and only where the surface exists", async () => {
+  const { ctx, state, httpServer } = buildCtx();
+  state.flags.ready = true;
+
+  const triggered = await wsCall(ctx, { id: 1, cmd: "device.action", sn: "SIRENCAM1", action: "trigger", args: [10] });
+  assert.equal(triggered[0].ok, true);
+
+  const stopped = await wsCall(ctx, { id: 2, cmd: "device.action", sn: "SIRENCAM1", action: "stop" });
+  assert.equal(stopped[0].ok, true);
+
+  // The positional args reach the surface unchanged — a duration the SDK validates, not a clamp here.
+  assert.deepEqual(ctx.eufy.sirenCalls, [["trigger", 10], ["stop"]]);
+
+  // A device whose capabilities never installed a siren answers the same way an unknown verb does:
+  // no surface carries the method, so the command fails instead of silently doing nothing.
+  const absent = await wsCall(ctx, { id: 3, cmd: "device.action", sn: "CAM1", action: "trigger", args: [10] });
+  assert.equal(absent[0].ok, false);
+  assert.match(absent[0].error, /no action 'trigger'/);
+  assert.deepEqual(ctx.eufy.sirenCalls, [["trigger", 10], ["stop"]]); // unchanged
+
   httpServer.close();
 });
 
@@ -200,5 +226,39 @@ test("http: /healthz reports ok + auth + empty streaming", async () => {
   assert.deepEqual(out.auth, { state: "pending" });
   assert.deepEqual(out.streaming, []);
   assert.equal(out.streamIdleMs, 300000);
+  assert.equal("lastActivitySec" in out, false);
+  assert.equal("stalled" in out, false);
+  httpServer.close();
+});
+
+test("ws: device.action reaches the ptz surface, bare verbs and dotted preset paths", async () => {
+  const { ctx, state, httpServer } = buildCtx();
+  state.flags.ready = true;
+
+  // A bare verb resolves straight off `dev.ptz()` — one d-pad press, no arguments.
+  const left = await wsCall(ctx, { id: 1, cmd: "device.action", sn: "PTCAM1", action: "left" });
+  assert.equal(left[0].ok, true);
+
+  // A dotted action walks the namespace: `preset()` is called with nothing, `goto` gets the args.
+  const goto = await wsCall(ctx, { id: 2, cmd: "device.action", sn: "PTCAM1", action: "preset.goto", args: [3] });
+  assert.equal(goto[0].ok, true);
+  assert.deepEqual(ctx.eufy.ptzCalls, [["left"], ["preset.goto", 3]]);
+
+  // A verb no surface carries is refused, not thrown: `calibrate` is a raw P2P command id in the
+  // SDK, never promoted to a capability member, so a host asking for it gets a clean error.
+  const bogus = await wsCall(ctx, { id: 3, cmd: "device.action", sn: "PTCAM1", action: "calibrate" });
+  assert.equal(bogus[0].ok, false);
+  assert.match(bogus[0].error, /no action 'calibrate'/);
+
+  // Same for a dotted path whose leaf is missing — walking the namespace must not mask the failure.
+  const badLeaf = await wsCall(ctx, { id: 4, cmd: "device.action", sn: "PTCAM1", action: "preset.nope" });
+  assert.equal(badLeaf[0].ok, false);
+  assert.match(badLeaf[0].error, /no action 'preset.nope'/);
+
+  // A fixed camera exposes no ptz surface at all, so movement is refused there too.
+  const fixed = await wsCall(ctx, { id: 5, cmd: "device.action", sn: "CAM1", action: "left" });
+  assert.equal(fixed[0].ok, false);
+  assert.match(fixed[0].error, /no action 'left'/);
+
   httpServer.close();
 });

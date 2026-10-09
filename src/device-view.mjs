@@ -1,3 +1,4 @@
+import { unobservableMembers } from "@mega-yfue/eufy-sdk";
 // The host-facing view of a device: identity + capabilities + live property values + a stream path for
 // cameras. This is the shape the WS `devices.list` / `device.state` / `device.properties` commands and
 // the go2rtc camera registration both read, so a camera is "a device describeDevice gave a `stream`",
@@ -5,44 +6,14 @@
 
 export function createDeviceView(ctx) {
   const { eufy } = ctx;
+  // Which members of a bound capability are settable but never reported; injectable so a test can state it.
+  const unobservable = ctx.unobservableMembers ?? unobservableMembers;
   const { streaming } = ctx.state;
-
-  // EufyMega intentionally keeps handed-out Device objects only through WeakRef. The host must retain
-  // them if it expects realtime state (propertyChanged / refresh-backed semantic events) to keep landing.
-  // Keeping one canonical Device per serial also avoids a cloud-backed getDevice() on every host read.
-  const devices = new Map();
-  const pendingDevices = new Map();
-
-  async function deviceFor(sn) {
-    const held = devices.get(sn);
-    if (held) return held;
-    const pending = pendingDevices.get(sn);
-    if (pending) return pending;
-
-    const load = eufy
-      .getDevice(sn)
-      .then((dev) => {
-        devices.set(sn, dev);
-        pendingDevices.delete(sn);
-        return dev;
-      })
-      .catch((err) => {
-        pendingDevices.delete(sn);
-        throw err;
-      });
-    pendingDevices.set(sn, load);
-    return load;
-  }
-
-  function cachedDevice(sn) {
-    return devices.get(sn);
-  }
 
   function enrichDeviceEvent(event, payload = {}) {
     if (event !== "armingModeChanged" || payload.mode !== undefined) return payload;
     const sn = payload.deviceSn ?? payload.sn;
-    const sdkMode = cachedDevice(sn)?.getProperty?.("armingMode")?.value;
-    const mode = ctx.armingModeOverride?.(sn, sdkMode) ?? sdkMode;
+    const mode = ctx.armingModeOverride?.(sn, undefined);
     return mode === undefined ? payload : { ...payload, mode };
   }
 
@@ -54,7 +25,7 @@ export function createDeviceView(ctx) {
    * as its model — no cross-referencing the device list.
    */
   async function describeDevice(sn) {
-    const dev = await deviceFor(sn);
+    const dev = await eufy.getDevice(sn);
     const m = dev.describe();
     const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
     const state = propertyState(dev);
@@ -68,6 +39,7 @@ export function createDeviceView(ctx) {
       codec: m.codec,
       capabilities: m.capabilities,
       state, // live property values ({ battery: 74, motion: false, … })
+      ...decodedReadings(dev, m),
       stream: isCamera ? `/stream/${m.sn}` : undefined,
       streaming: isCamera ? streaming.has(m.sn) : undefined, // live P2P feed active right now?
       canReboot: m.codec === "station", // HomeBase-only; drives a Reboot button in HA
@@ -82,12 +54,68 @@ export function createDeviceView(ctx) {
   }
 
   /**
+   * The manifest's capabilities that have a read surface. A capability whose whole surface is inbound events
+   * (`person_detection`, since eufy-sdk 0.4.0) carries no `accessor` and no reads, so it has nothing to decode
+   * and is left out of both `decodedState` and `decodedProperties`.
+   */
+  function readSurfaces(manifest) {
+    return (manifest.details ?? []).filter((cap) => typeof cap.accessor === "string" && cap.accessor);
+  }
+
+  /** Read only the getters named by the SDK manifest; never invoke an action or setter. */
+  function decodedReadings(dev, manifest = dev.describe()) {
+    const errors = [];
+    const decodedState = Object.fromEntries(
+      readSurfaces(manifest).map((cap) => {
+        const surface = dev[cap.accessor]?.();
+        return [
+          cap.accessor,
+          Object.fromEntries(
+            (cap.reads ?? []).map((read) => {
+              let value;
+              try {
+                value = surface?.[read.accessor];
+                if (
+                  value != null &&
+                  typeof value !== "string" &&
+                  typeof value !== "boolean" &&
+                  !(typeof value === "number" && Number.isFinite(value))
+                ) {
+                  errors.push({ capability: cap.accessor, accessor: read.accessor, error: "non_scalar" });
+                  value = undefined;
+                }
+              } catch {
+                // Keep raw state available if an optional decoder fails. Never expose exception data.
+                errors.push({ capability: cap.accessor, accessor: read.accessor, error: "read_failed" });
+              }
+              return [read.accessor, value ?? null];
+            }),
+          ),
+        ];
+      }),
+    );
+    return { decodedState, ...(errors.length ? { decodedErrors: errors } : {}) };
+  }
+
+  /** Keep the SDK's read metadata and capability namespaces, without re-deriving a second schema. */
+  function decodedProperties(dev, manifest = dev.describe()) {
+    return {
+      bound: manifest.bound,
+      details: readSurfaces(manifest).map(({ capability, accessor, reads }) => ({
+        capability,
+        accessor,
+        reads,
+      })),
+    };
+  }
+
+  /**
    * The device's property manifest — the host-relevant half of each PropertySpec, so a frontend can
    * build the right entity (writable bool → switch, enum → select, number → number, else sensor)
    * without knowing eufy wire ids. Wire-only fields (paramType, decode, aliases) are omitted.
    */
   function propertySpecs(dev) {
-    return (dev.properties ?? []).map((p) => ({
+    const reported = (dev.properties ?? []).map((p) => ({
       name: p.name,
       type: p.type, // "bool" | "number" | "string" | "enum"
       unit: p.unit, // "%", "°C", "dBm", …
@@ -96,6 +124,45 @@ export function createDeviceView(ctx) {
       enumValues: p.enumValues, // { raw: label } for enums
       description: p.description,
     }));
+    // Write-only settings a device ACCEPTS but never reports back (a HomeBase's alarm volume). They are
+    // not in `dev.properties` — that manifest is what the device reports — so a host would otherwise never
+    // learn the control exists. The SDK states them in two halves: `unobservableMembers(dev.<cap>())` names
+    // the members that are settable but never reported, and `dev.describe()` carries each one's setter as
+    // an action whose first argument gives the kind and bounds. Joined here into one spec, marked
+    // `writeOnly` so a frontend shows an optimistic control (the device won't confirm the value) and drives
+    // it through the same `device.set` path.
+    // A device can declare a write-only setting whose name a reported property already carries (a
+    // doorbell reports `ringtoneVolume` AND accepts a write-only one). The reported spec wins — it has a
+    // live value — so a write-only is added only when the name is new, or a host builds two entities
+    // with the same unique id. The setter is found by naming convention (`alarmVolume` → `setAlarmVolume`):
+    // a member whose setter is named otherwise is skipped, not guessed, so a mismatch silently omits it.
+    const reportedNames = new Set(reported.map((p) => p.name));
+    const writeOnly = [];
+    for (const cap of dev.describe?.().details ?? []) {
+      const surface = typeof dev[cap.accessor] === "function" ? dev[cap.accessor]() : undefined;
+      if (!surface) continue;
+      for (const name of unobservable(surface)) {
+        if (reportedNames.has(name) || writeOnly.some((w) => w.name === name)) continue;
+        const setter = cap.actions.find((a) => a.name === `set${name[0].toUpperCase()}${name.slice(1)}`);
+        const arg = setter?.args?.[0];
+        if (!arg) continue; // settable in name only: no described argument, nothing a host can build
+        writeOnly.push({
+          name,
+          type: arg.values ? "enum" : arg.kind === "bool" ? "bool" : arg.kind === "text" ? "string" : "number",
+          unit: arg.kind === "percent" ? "%" : undefined,
+          kind: arg.kind,
+          writable: true,
+          writeOnly: true,
+          min: arg.min,
+          max: arg.max,
+          enumValues: arg.values
+            ? Object.fromEntries(arg.values.map((v) => [v, arg.labels?.[v] ?? String(v)]))
+            : undefined,
+          description: setter.description,
+        });
+      }
+    }
+    return [...reported, ...writeOnly];
   }
 
   async function deviceList() {
@@ -105,13 +172,5 @@ export function createDeviceView(ctx) {
     );
   }
 
-  return {
-    deviceFor,
-    cachedDevice,
-    enrichDeviceEvent,
-    describeDevice,
-    propertyState,
-    propertySpecs,
-    deviceList,
-  };
+  return { describeDevice, enrichDeviceEvent, propertyState, propertySpecs, decodedProperties, deviceList };
 }

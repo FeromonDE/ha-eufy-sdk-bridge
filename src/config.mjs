@@ -5,9 +5,15 @@ import path from "node:path";
 export const SCHEMA_VERSION = 1; // bump on any breaking protocol change so an old frontend fails loudly
 
 const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
+/** A positive whole number from an env value, else undefined (so the caller's default applies). */
+const positiveInt = (v) => {
+  const n = Number(v);
+  return v != null && v !== "" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
+};
 
 /** The SDK event names broadcast to every connected WS client. */
 export const FORWARDED_EVENTS = [
+  "propertyChanged",
   "motion",
   "personDetected",
   "strangerDetected",
@@ -49,6 +55,7 @@ export const DETECTION_EVENTS = new Set([
 
 export const PUSH_STALL_MS = 5 * 60_000; // push down (or never up) this long ⇒ events are dead ⇒ recover
 export const SUSPEND_RELEASE_MS = 30_000; // no /stream pull this long while suspended ⇒ nobody's watching
+export const STREAM_FAIL_BACKOFF_MAX_MS = 5 * 60_000; // cap on the exponential backoff after failed opens
 
 /**
  * Parse the environment into the config + derived constants. `dbg` is a no-op unless BRIDGE_DEBUG is on.
@@ -56,18 +63,26 @@ export const SUSPEND_RELEASE_MS = 30_000; // no /stream pull this long while sus
  * routes the SDK's raw per-frame ConsoleLogger (very noisy).
  */
 export function loadConfig(env = process.env) {
-  const snapshotLive = env.SNAPSHOT_LIVE;
   const cfg = {
     email: env.EUFY_EMAIL,
     password: env.EUFY_PASSWORD,
     country: env.EUFY_COUNTRY || "GB",
-    // Acting name written into Eufy's command attribution (e.g. "who changed guard mode").
-    // Unset → SDK falls back to the login email's local-part.
+    // Friendly actor label written into Eufy's command attribution/history.
+    // Unset → SDK falls back to the login email local-part.
     accountName: env.EUFY_ACCOUNT_NAME?.trim() || undefined,
     host: env.BRIDGE_HOST || "0.0.0.0",
     port: Number(env.BRIDGE_PORT || 3000),
     session: env.EUFY_SESSION || "./data/.eufy-session.json",
+    // Distinct per-install device identity. Unset → the SDK derives one from the account email, which is
+    // STABLE but IDENTICAL for every client on the account — so a second client (a second bridge, or the
+    // phone app under some conditions) presents the same identity and the two displace each other's
+    // session / split push delivery. Set a unique value per bridge when you run more than one on an account.
+    openudid: env.BRIDGE_OPENUDID || undefined,
     go2rtcConfig: env.GO2RTC_CONFIG || "./go2rtc.yaml",
+    // Toggle for the bundled go2rtc process. Useful when running go2rtc as a separate container/service
+    // instead of the one bundled here. Default ON to match existing behavior; set GO2RTC_ENABLE=0 to skip
+    // spawning it.
+    go2rtcEnable: env.GO2RTC_ENABLE == null ? true : truthy(env.GO2RTC_ENABLE),
     selfHost: env.BRIDGE_SELF_HOST || "127.0.0.1",
     // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). Changeable live via the
     // config.set WS command. 0 disables polling.
@@ -76,21 +91,69 @@ export function loadConfig(env = process.env) {
     // while its P2P live session is up, and go2rtc holds /stream open as long as anything consumes it —
     // so keep the feed only while detections are recent. Default 5 min; 0 disables.
     streamIdleMs: env.STREAM_IDLE_MS != null ? Number(env.STREAM_IDLE_MS) : 300_000,
-    // Camera stills. "auto" (default) takes a fresh live snapshot only from mains-powered cameras.
-    // A live snapshot wakes a battery camera's radio, while HA may refresh camera tiles repeatedly.
-    // 1 forces live snapshots everywhere; 0 disables live snapshots everywhere. In both cases the
-    // retained/persisted event thumbnail remains available as a no-wake fallback.
-    snapshotLive: snapshotLive == null || snapshotLive === "auto" ? "auto" : truthy(snapshotLive),
     // Battery-saver: a BATTERY camera left with the device's native `rtspStream` publish ON encodes
     // continuously and drains, even when nobody consumes it. If a battery device has rtspStream=true and
     // has been idle this long, turn rtspStream OFF on the device. Default 5 min; 0 disables.
     rtspIdleOffMs: env.RTSP_IDLE_OFF_MS != null ? Number(env.RTSP_IDLE_OFF_MS) : 300_000,
+    // Battery-saver: when a /stream open FAILS (P2P connect timeout, no p2p_did, connection closed), go2rtc's
+    // ffmpeg source keeps retrying into /stream every ~30s — and each retry opens a fresh P2P session,
+    // waking the camera radio for nothing on a camera that can't connect. After a failure, refuse reopening
+    // for this base window (doubling per consecutive failure, capped at STREAM_FAIL_BACKOFF_MAX_MS) so a
+    // hammering consumer gets a fast 503 instead of a radio wake. Cleared on a successful open or a
+    // detection. Default 30s (≈ one ffmpeg retry cycle); 0 disables.
+    streamFailBackoffMs: env.STREAM_FAIL_BACKOFF_MS != null ? Number(env.STREAM_FAIL_BACKOFF_MS) : 30_000,
+    // A live snapshot burst wakes a battery camera's radio for EVERY caller — and HA fetches a still per
+    // camera whenever a dashboard renders or the HomeKit tiles refresh. On an account whose pushes carry
+    // no thumbnail, `snapshotStored()` is always empty, so the burst is the only path and every tile costs
+    // a wake (and a ~10-20s stall, past HA's 10s still timeout). Set SNAPSHOT_LIVE=0 to skip the burst and
+    // answer from the retained/persisted thumbnail only. Default on — unchanged behaviour.
+    // "auto" (default): wake the camera for a still only when it is MAINS-POWERED. A mains camera
+    // answers a live burst for free; a battery one pays a radio wake for every fetch, and a host fetches
+    // stills on a timer (HA re-pulls each camera tile), so the cost is continuous. `1` forces the burst
+    // everywhere, `0` never — both remain available for hosts that want the old behaviour.
+    snapshotLive: env.SNAPSHOT_LIVE == null || env.SNAPSHOT_LIVE === "auto" ? "auto" : truthy(env.SNAPSHOT_LIVE),
+    // How long a BATTERY camera may stream continuously, handed to the SDK when /stream opens the session.
+    // The SDK bounds a battery stream to a budget (default 45s) plus a 10s grace, then stops it unless the
+    // caller extends it — and a Readable, which is what /stream consumes, has no way to extend. So every
+    // watched battery stream ended after ~55s, and the consumer's reconnect woke the camera again. Unset
+    // keeps the SDK default. Mains cameras ignore it, and closing the last viewer still ends the session
+    // at once. Positive whole ms; anything else → default.
+    streamBatteryBudgetMs: positiveInt(env.STREAM_BATTERY_BUDGET_MS),
+    // How long after the push /clip waits before downloading a HomeBase 2 recording, so the station has
+    // finished writing it. Set it at least to the camera's clip length. Default 30s.
+    clipSettleMs: env.CLIP_SETTLE_MS != null ? Number(env.CLIP_SETTLE_MS) : 30_000,
     // Event pre-warm: the SDK can speculatively open a camera's P2P session on a high-intent event
     // (doorbell/person/pet/package) so a following live view starts instantly. OFF by default here — it
     // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to enable the SDK's
     // default pre-warm events.
     prewarm: truthy(env.BRIDGE_PREWARM),
+    // Optional Anker Solix support — a SEPARATE Anker account (its own login + device backend), enabled
+    // only when both SOLIX_EMAIL and SOLIX_PASSWORD are set. Independent of the eufy client; its own
+    // persisted session file. Country falls back to the eufy country.
+    solix:
+      env.SOLIX_EMAIL && env.SOLIX_PASSWORD
+        ? {
+            email: env.SOLIX_EMAIL,
+            password: env.SOLIX_PASSWORD,
+            country: env.SOLIX_COUNTRY || env.EUFY_COUNTRY || "GB",
+            session: env.SOLIX_SESSION || "./data/.solix-session.json",
+            // Cadence of the scene backstop poll — the slow authed read that fills the gap fields
+            // (battery temperature + a SOC cross-check) the MQTT push doesn't carry. Deliberately slow:
+            // Anker throttles frequent reads, and realtime already comes from the push. Default 90s.
+            scenePollMs: Number(env.SOLIX_SCENE_POLL_MS) || 90_000,
+            // Login self-heal backoff: after a failed login the bridge retries on an escalating delay
+            // (doubling from base, capped at max) rather than tight-looping — Anker throttles frequent
+            // logins ("too frequent") and can escalate to a captcha. Base 15 min (past the throttle
+            // window), cap 1 h. Raise if you still see throttling; there is rarely a reason to lower.
+            retryBaseMs: Number(env.SOLIX_RETRY_BASE_MS) || 15 * 60 * 1000,
+            retryMaxMs: Number(env.SOLIX_RETRY_MAX_MS) || 60 * 60 * 1000,
+          }
+        : undefined,
   };
+  // Where the FCM push registration (token + seen-ids) is persisted, beside the session file. Without a
+  // pushStore the SDK falls back to MemoryFcmStore and re-registers a fresh token on every restart —
+  // wasted work, and it's what makes a same-identity collision bite rather than self-correct (issue #30).
+  cfg.pushSession = path.join(path.dirname(cfg.session), ".eufy-fcm.json");
 
   const DEBUG = truthy(env.BRIDGE_DEBUG);
   const DEBUG_P2P = truthy(env.BRIDGE_DEBUG_P2P);
@@ -120,5 +183,6 @@ export function loadConfig(env = process.env) {
     DETECTION_EVENTS,
     PUSH_STALL_MS,
     SUSPEND_RELEASE_MS,
+    STREAM_FAIL_BACKOFF_MAX_MS,
   };
 }
