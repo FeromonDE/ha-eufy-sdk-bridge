@@ -1,6 +1,6 @@
 # ha-eufy-sdk-bridge
 
-[![CI](https://github.com/mega-yfue/ha-eufy-sdk-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mega-yfue/ha-eufy-sdk-bridge/actions/workflows/ci.yml)
+[![CI](https://github.com/FeromonDE/ha-eufy-sdk-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/FeromonDE/ha-eufy-sdk-bridge/actions/workflows/ci.yml)
 [![node](https://img.shields.io/badge/node-%E2%89%A524-brightgreen?logo=nodedotjs&logoColor=white)](./package.json)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 
@@ -29,7 +29,7 @@ Pull the published image and run it (bundles the SDK + go2rtc):
 docker run -d --name eufy-bridge --network host \
   -e EUFY_EMAIL='you@example.com' -e EUFY_PASSWORD='…' -e EUFY_COUNTRY='GB' \
   -v /opt/eufy-bridge-data:/app/data \
-  ghcr.io/mega-yfue/ha-eufy-sdk-bridge:latest
+  ghcr.io/feromonde/ha-eufy-sdk-bridge:latest
 ```
 
 or with Compose (`cp .env.example .env` first): `docker compose up -d`.
@@ -49,7 +49,7 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 > Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
 > streaming. **Optional Anker Solix** support (power stations / smart meter / Solarbank, a separate account)
 > via `SOLIX_EMAIL` / `SOLIX_PASSWORD` — see [docs/ws-protocol.md](./docs/ws-protocol.md) (`solix.*`).
-> Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64`).
+> Published image: `ghcr.io/feromonde/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64`).
 > **Publishing a GitHub Release** builds and pushes the versioned + `:latest` tags
 > automatically ([`.github/workflows/publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml)); the same
 > build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh). A merge to the
