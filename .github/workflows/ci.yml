@@ -23,10 +23,7 @@ jobs:
         run: npm ci
       # lint: formatting is enforced, not debated.
       - name: Lint (Prettier)
-        run: |
-          npx prettier --write test/config.test.mjs test/go2rtc-config.test.mjs
-          git diff -- test/config.test.mjs test/go2rtc-config.test.mjs
-          exit 1
+        run: npm run lint
       # compile: the bridge is ESM (no tsc), so syntax-check every module — catches parse/typo errors
       # a plain `require` at runtime would only hit lazily.
       - name: Compile (ESM syntax-check)
