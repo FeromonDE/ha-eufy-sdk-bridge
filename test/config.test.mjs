@@ -35,20 +35,32 @@ test("SOLIX_RETRY_BASE_MS / SOLIX_RETRY_MAX_MS: defaults and custom values", () 
   const def = loadConfig(solixEnv).cfg.solix;
   assert.equal(def.retryBaseMs, 15 * 60 * 1000); // 15 min
   assert.equal(def.retryMaxMs, 60 * 60 * 1000); // 1 h
-  const custom = loadConfig({ ...solixEnv, SOLIX_RETRY_BASE_MS: "60000", SOLIX_RETRY_MAX_MS: "300000" }).cfg.solix;
+  const custom = loadConfig({
+    ...solixEnv,
+    SOLIX_RETRY_BASE_MS: "60000",
+    SOLIX_RETRY_MAX_MS: "300000",
+  }).cfg.solix;
   assert.equal(custom.retryBaseMs, 60_000);
   assert.equal(custom.retryMaxMs, 300_000);
 });
 
 test("openudid is undefined by default and taken from BRIDGE_OPENUDID when set", () => {
   assert.equal(loadConfig(base).cfg.openudid, undefined); // → SDK derives from email
-  assert.equal(loadConfig({ ...base, BRIDGE_OPENUDID: "abcd1234abcd1234" }).cfg.openudid, "abcd1234abcd1234");
+  assert.equal(
+    loadConfig({ ...base, BRIDGE_OPENUDID: "abcd1234abcd1234" }).cfg.openudid,
+    "abcd1234abcd1234",
+  );
   assert.equal(loadConfig({ ...base, BRIDGE_OPENUDID: "" }).cfg.openudid, undefined); // empty → default
 });
 
-
 test("EUFY_ACCOUNT_NAME overrides command attribution name", () => {
-  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "Home Assistant" }).cfg.accountName, "Home Assistant");
-  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "  Home Assistant  " }).cfg.accountName, "Home Assistant");
+  assert.equal(
+    loadConfig({ ...base, EUFY_ACCOUNT_NAME: "Home Assistant" }).cfg.accountName,
+    "Home Assistant",
+  );
+  assert.equal(
+    loadConfig({ ...base, EUFY_ACCOUNT_NAME: "  Home Assistant  " }).cfg.accountName,
+    "Home Assistant",
+  );
   assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "   " }).cfg.accountName, undefined);
 });
