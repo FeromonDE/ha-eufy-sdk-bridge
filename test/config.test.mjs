@@ -45,3 +45,10 @@ test("openudid is undefined by default and taken from BRIDGE_OPENUDID when set",
   assert.equal(loadConfig({ ...base, BRIDGE_OPENUDID: "abcd1234abcd1234" }).cfg.openudid, "abcd1234abcd1234");
   assert.equal(loadConfig({ ...base, BRIDGE_OPENUDID: "" }).cfg.openudid, undefined); // empty → default
 });
+
+
+test("EUFY_ACCOUNT_NAME overrides command attribution name", () => {
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "Home Assistant" }).cfg.accountName, "Home Assistant");
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "  Home Assistant  " }).cfg.accountName, "Home Assistant");
+  assert.equal(loadConfig({ ...base, EUFY_ACCOUNT_NAME: "   " }).cfg.accountName, undefined);
+});
