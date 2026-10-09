@@ -342,4 +342,3 @@ test("snapshot: ignores old last-live files from previous FFmpeg builds", async 
   assert.deepEqual(out.body, JPEG);
   assert.equal(calls.live, 0);
 });
-
