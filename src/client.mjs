@@ -3,6 +3,26 @@
 // needs other modules (error → session recovery, push liveness) lives in server.mjs, after ctx is whole.
 import { EufyMega, FileSessionStore, FileFcmStore, ConsoleLogger } from "@mega-yfue/eufy-sdk";
 
+
+export const BRIDGE_P2P_STATION_FRAME = "bridgeP2PStationFrame";
+
+/**
+ * Preserve the station serial on raw P2P frames.
+ *
+ * SDK 0.4.0 still publishes the public `p2p` event as only the frame, while the internal callback
+ * receives `(stationSn, frame)`. Guard-mode cmd 1151 is station-scoped, so keep that identity at the
+ * bridge boundary without changing the SDK's public event contract.
+ */
+export function preserveP2PStationContext(eufy) {
+  const original = eufy?.onP2PFrame;
+  if (typeof original !== "function") return false;
+  eufy.onP2PFrame = function (stationSn, frame) {
+    this.emit(BRIDGE_P2P_STATION_FRAME, { stationSn, frame });
+    return original.call(this, stationSn, frame);
+  };
+  return true;
+}
+
 /**
  * Build the SDK client from config. `logger` is attached only under BRIDGE_DEBUG_P2P (raw transport logs).
  *
@@ -16,6 +36,7 @@ export function createEufy({ cfg, DEBUG_P2P }) {
     email: cfg.email,
     password: cfg.password,
     countryCode: cfg.country,
+    accountName: cfg.accountName,
     store: new FileSessionStore(cfg.session),
     // Persist the FCM push registration so a restart RECONNECTS with the same token + seen-ids instead of
     // re-registering fresh each boot (the SDK defaults to MemoryFcmStore without this). See issue #30.
@@ -31,6 +52,9 @@ export function createEufy({ cfg, DEBUG_P2P }) {
     logger: DEBUG_P2P ? new ConsoleLogger() : undefined,
   });
   memoizeGetDevice(eufy);
+  if (!preserveP2PStationContext(eufy)) {
+    console.warn("[bridge] SDK raw P2P station context hook unavailable — realtime guard-mode 1151 disabled");
+  }
   return eufy;
 }
 
