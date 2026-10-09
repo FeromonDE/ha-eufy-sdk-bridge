@@ -20,10 +20,11 @@ export function createState() {
       go2rtcProc: undefined,
     },
     // Interval handles, armed once at boot and cleared on shutdown.
-    timers: { watchdog: null, streamIdle: null, rtspIdle: null },
+    timers: { watchdog: null, streamIdle: null, rtspIdle: null, armingPoll: null },
 
     clients: new Set(), // connected WS clients (broadcast targets)
     streaming: new Set(), // sns with a live P2P feed piping right now
+    armingOverrides: new Map(), // sn -> { mode, at }; fast arming truth while slower cloud state converges
 
     // person_id -> { name, familiar } — the HomeBase edge-AI face roster, built once at startup.
     faceNames: new Map(),
