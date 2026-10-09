@@ -13,6 +13,7 @@ bundled, so live camera video is available as RTSP / WebRTC / MSE / HLS with not
 WS    :3000/ws             control, state, events     ← the frontend talks to this
 HTTP  :3000/stream/<sn>    live video (Annex-B)       ← go2rtc pulls this
 HTTP  :3000/snapshot/<sn>  a JPEG still
+HTTP  :3000/clip/<sn>      the latest detection's recording, as an mp4 (HomeBase 2)
 HTTP  :3000/healthz        which cameras are streaming
 ```
 
@@ -46,7 +47,9 @@ or with Compose (`cp .env.example .env` first): `docker compose up -d`.
 | [`ha-eufy-sdk`](https://github.com/mega-yfue/ha-eufy-sdk)             | the HACS integration (front door)             |
 
 > Status: working — WS control + auth-over-WS (2FA/captcha), device listing, snapshots, and go2rtc
-> streaming. Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64`).
+> streaming. **Optional Anker Solix** support (power stations / smart meter / Solarbank, a separate account)
+> via `SOLIX_EMAIL` / `SOLIX_PASSWORD` — see [docs/ws-protocol.md](./docs/ws-protocol.md) (`solix.*`).
+> Published image: `ghcr.io/mega-yfue/ha-eufy-sdk-bridge` (multi-arch: `amd64` · `arm64`).
 > **Publishing a GitHub Release** builds and pushes the versioned + `:latest` tags
 > automatically ([`.github/workflows/publish-ghcr.yml`](./.github/workflows/publish-ghcr.yml)); the same
 > build runs locally via [`scripts/publish-multiarch.sh`](./scripts/publish-multiarch.sh). A merge to the

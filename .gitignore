@@ -4,3 +4,6 @@ data/
 go2rtc.yaml
 .env
 *.log
+
+# Local SDK tarball for Dockerfile.local (build artifact from `npm pack`, never committed)
+eufy-sdk-local.tgz

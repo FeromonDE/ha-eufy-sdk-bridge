@@ -1,13 +1,18 @@
-// A failed openReadable() must evict only that camera's cached stream entry so the next request
-// builds a fresh P2P session instead of reusing a wedged one.
+// A stream client whose P2P session died must not be reused. streams.mjs caches one client per camera
+// and never expires it, so a wedged session turns into a permanent "P2P unreachable" for that camera —
+// observed for hours while the eufy app held a live view of the SAME camera, and cured only by a bridge
+// restart (which empties the cache). The route must therefore drop the client whenever an open fails.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { loadConfig } from "../src/config.mjs";
 import { createState } from "../src/state.mjs";
 import { dropStreamClient } from "../streams.mjs";
-import { createHttpHandler } from "../src/http-routes.mjs";
 
+process.env.BRIDGE_STREAM_CONSUMER_LOG_MS = "0"; // no real HTTP at :1984 from the consumer probe
+const { createHttpHandler } = await import("../src/http-routes.mjs");
+
+/** A handler whose stream client always fails to open, recording the drops the route asks for. */
 function setup() {
   const config = loadConfig({ EUFY_EMAIL: "x@y.z", EUFY_PASSWORD: "pw" });
   const state = createState();
@@ -16,41 +21,56 @@ function setup() {
   const ctx = {
     ...config,
     state,
-    authStatus: () => ({ state: "ok" }),
-    broadcast: () => {},
     eventLog: () => {},
-    streamCameraFor: async () => ({
-      openReadable: async () => {
-        throw new Error("P2P connect timeout");
-      },
+    broadcast: () => {},
+    noteStreamOpened: () => {},
+    noteStreamFailure: () => {},
+    streamBackoffMs: () => 0,
+    dropStreamClient: (sn) => void dropped.push(sn),
+    streamClientFor: async () => ({
+      getDevice: async () => ({
+        camera: () => ({
+          openReadable: async () => {
+            throw new Error("P2P connect timeout");
+          },
+        }),
+      }),
     }),
-    dropStreamClient: (sn) => dropped.push(sn),
   };
   return { handler: createHttpHandler(ctx), dropped };
 }
 
 async function pull(handler) {
-  const out = {};
-  const req = { url: "/stream/CAM1", headers: { host: "localhost" }, on() {} };
+  const out = { chunks: [] };
   const res = {
     writeHead(code) {
       out.code = code;
     },
-    end(body) {
-      out.body = body;
+    write(c) {
+      out.chunks.push(Buffer.from(c));
+      return true;
     },
+    end(body) {
+      if (body) out.chunks.push(Buffer.from(body));
+    },
+    on() {},
+    once() {},
+    emit() {},
+    removeListener() {},
+    off() {},
+    destroy() {},
   };
-  await handler(req, res);
+  await handler({ url: "/stream/CAM1", headers: { host: "localhost" }, on() {} }, res);
   return out;
 }
 
-test("failed live open drops the cached per-camera stream entry", async () => {
+test("a failed open drops the cached client instead of keeping it", async () => {
   const { handler, dropped } = setup();
   const out = await pull(handler);
   assert.equal(out.code, 502);
-  assert.deepEqual(dropped, ["CAM1"]);
+  assert.deepEqual(dropped, ["CAM1"]); // the next attempt must start from a fresh session
 });
 
-test("dropStreamClient is harmless for a camera that has no cached entry", () => {
+test("dropStreamClient is harmless for a camera that has no client", () => {
   assert.equal(dropStreamClient("NEVER-OPENED"), false);
 });

@@ -3,6 +3,7 @@
 //   WS    :PORT/ws             control, state, events, AUTH   (the frontend talks to this)
 //   HTTP  :PORT/stream/<sn>    live video (Annex-B)           (go2rtc pulls this)
 //   HTTP  :PORT/snapshot/<sn>  a JPEG still
+//   HTTP  :PORT/clip/<sn>      the latest detection's recording, as an mp4 (HomeBase 2)
 //   HTTP  :PORT/healthz        liveness + auth state + which cameras are streaming
 //
 // This file is just the WIRING. Each concern lives in src/: config, the SDK client, the shared runtime
@@ -14,15 +15,16 @@ import http from "node:http";
 import fs from "node:fs";
 import { loadConfig } from "./src/config.mjs";
 import { createState } from "./src/state.mjs";
-import { BRIDGE_P2P_STATION_FRAME, createEufy } from "./src/client.mjs";
+import { createEufy } from "./src/client.mjs";
 import { createFaces } from "./src/faces.mjs";
 import { createDeviceView } from "./src/device-view.mjs";
-import { createArmingRealtime } from "./src/arming-realtime.mjs";
 import { createWarmup } from "./src/warmup.mjs";
 import { createStreamIdle } from "./src/stream-idle.mjs";
 import { createWatchdog } from "./src/watchdog.mjs";
 import { createAuth } from "./src/auth.mjs";
 import { createBoot } from "./src/boot.mjs";
+import { createSolix } from "./src/solix.mjs";
+import { createClips } from "./src/clip.mjs";
 import { createHttpHandler } from "./src/http-routes.mjs";
 import { createWsServer } from "./src/ws-server.mjs";
 import { closeStreamClients } from "./streams.mjs";
@@ -52,13 +54,14 @@ const ctx = { ...config, eufy, state };
 Object.assign(
   ctx,
   createFaces(ctx),
-  createArmingRealtime(ctx),
   createDeviceView(ctx),
   createWarmup(ctx),
   createStreamIdle(ctx),
   createWatchdog(ctx),
   createAuth(ctx),
   createBoot(ctx),
+  createSolix(ctx),
+  createClips(ctx),
 );
 
 const httpServer = http.createServer(createHttpHandler(ctx));
@@ -69,12 +72,10 @@ eufy.on("error", (e) => {
   console.error(`[bridge] sdk error: ${e?.message ?? e}`);
   // A kicked/invalid cloud token surfaces as SessionExpiredError (the SDK has already cleared the
   // session) on the generic error bus. Match by name rather than `instanceof` so it still fires under a
-  // dual-package install where host and SDK hold different class objects. React immediately instead of
-  // waiting out the ~30-min poll-stall watchdog.
+  // dual-package install where host and SDK hold different class objects.
   if (e?.name === "SessionExpiredError") ctx.maybeRecoverSession();
 });
-// Push (FCM) liveness — the watchdog's poll heartbeat can't see a dead push channel (events ride push,
-// state rides poll), so track push connect/disconnect explicitly.
+// Push (FCM) liveness uses explicit transport connect/disconnect events.
 eufy.on("pushConnect", () => {
   state.flags.pushConnected = true;
   state.flags.pushSince = Date.now();
@@ -83,19 +84,19 @@ eufy.on("pushDisconnect", () => {
   state.flags.pushConnected = false;
   state.flags.pushSince = Date.now();
 });
-// Raw push arrives before the SDK's semantic MODE_SWITCH cloud-convergence wait.
-eufy.on("push", (event) => {
-  ctx.onRawArmingPush(event);
-});
-// HomeBase reports alarm-mode changes on its persistent control P2P session as command 1151.
-// Use the bridge-local station-tagged event: SDK 0.1.0's public "p2p" event drops stationSn.
-eufy.on(BRIDGE_P2P_STATION_FRAME, ({ stationSn, frame }) => {
-  ctx.onP2PArmingFrame(stationSn, frame);
-});
-// Targeted cloud-read fallback: Device freshness refreshes emit propertyChanged, not armingModeChanged.
-eufy.on("propertyChanged", (change) => {
-  ctx.onCloudArmingPropertyChanged(change);
-});
+
+// eufy answers a wrong country with the same `200/26108 Email address or password incorrect`
+// it uses for a genuinely wrong password, which sends people to debug the one thing that isn't
+// wrong (#60). The upstream code doesn't separate the two cases, so don't pretend to — just
+// name the other candidate, since it is the one nobody thinks of.
+const COUNTRY_HINT =
+  " (if the credentials are definitely right, check EUFY_COUNTRY: it must be the country the" +
+  " account was registered in)";
+
+function loginFailureHint(e) {
+  const msg = String(e?.message ?? e);
+  return /26108|password incorrect/i.test(msg) ? msg + COUNTRY_HINT : msg;
+}
 
 // ── boot ───────────────────────────────────────────────────────────────────────────────────────────
 async function main() {
@@ -104,11 +105,15 @@ async function main() {
   try {
     await ctx.applyLogin(await eufy.login());
   } catch (e) {
-    console.error(`[bridge] login attempt failed: ${e?.message ?? e} — retry via WS 'auth.retrigger'`);
+    console.error(`[bridge] login attempt failed: ${loginFailureHint(e)} — retry via WS 'auth.retrigger'`);
   }
   if (state.flags.ready) console.log("[bridge] logged in from a stored session");
   else
     console.log(`[bridge] auth required: ${ctx.authStatus().state} — drive it over WS /ws (auth.status / auth.submit)`);
+
+  // Anker Solix is a separate account on a separate backend, so start it independently of the eufy
+  // login above — its outcome never gates eufy devices. No-op unless SOLIX_* is configured.
+  if (cfg.solix) void ctx.startSolix?.();
 }
 
 async function shutdown() {
@@ -116,9 +121,9 @@ async function shutdown() {
   if (timers.watchdog) clearInterval(timers.watchdog);
   if (timers.streamIdle) clearInterval(timers.streamIdle);
   if (timers.rtspIdle) clearInterval(timers.rtspIdle);
-  if (timers.armingPoll) clearInterval(timers.armingPoll);
   flags.go2rtcProc?.kill();
   await closeStreamClients();
+  await ctx.stopSolix?.();
   await eufy.disconnect?.();
   process.exit(0);
 }
