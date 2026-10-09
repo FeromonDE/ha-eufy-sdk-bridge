@@ -308,6 +308,9 @@ export function createHttpHandler(ctx) {
         });
         const feed = createAnnexBNormalizer();
         source.on("error", (err) => feed.destroy(err));
+        source.on("close", () => {
+          if (!source.readableEnded) feed.destroy();
+        });
         feed.on("close", () => source.destroy());
         source.pipe(feed);
         res.off("close", onGone);
