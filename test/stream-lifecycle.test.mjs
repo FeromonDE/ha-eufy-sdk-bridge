@@ -18,7 +18,6 @@ import { createStreamIdle } from "../src/stream-idle.mjs";
 process.env.BRIDGE_STREAM_CONSUMER_LOG_MS = "0"; // no real HTTP at :1984 from the consumer probe
 const { createHttpHandler } = await import("../src/http-routes.mjs");
 
-
 const KEYFRAME = Buffer.from([0, 0, 0, 1, 0x67, 0x01, 0, 0, 0, 1, 0x68, 0x02, 0, 0, 0, 1, 0x65, 0x03]);
 
 const videoFrame = () => ({ data: KEYFRAME, codec: "h264", keyframe: true });
