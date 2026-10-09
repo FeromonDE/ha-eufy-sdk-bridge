@@ -6,18 +6,12 @@ import assert from "node:assert/strict";
 
 import { writeGo2rtcConfig } from "../go2rtc-config.mjs";
 
-const cams = [
-  { sn: "CAM1", stream: "/stream/CAM1" },
-  { sn: "SENSOR1" },
-];
+const cams = [{ sn: "CAM1", stream: "/stream/CAM1" }, { sn: "SENSOR1" }];
 
 async function generate() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "go2rtc-"));
   const file = path.join(dir, "go2rtc.yaml");
-  const sns = await writeGo2rtcConfig(
-    { go2rtcConfig: file, selfHost: "127.0.0.1", port: 3000 },
-    cams,
-  );
+  const sns = await writeGo2rtcConfig({ go2rtcConfig: file, selfHost: "127.0.0.1", port: 3000 }, cams);
   return { yaml: fs.readFileSync(file, "utf8"), sns };
 }
 
@@ -30,8 +24,5 @@ test("go2rtc consumes the normalized HTTP stream directly without ffmpeg", async
 
 test("a device without a stream path is left out", async () => {
   const { yaml } = await generate();
-  assert.ok(
-    !yaml.includes("SENSOR1"),
-    "non-camera devices must not become go2rtc streams",
-  );
+  assert.ok(!yaml.includes("SENSOR1"), "non-camera devices must not become go2rtc streams");
 });
