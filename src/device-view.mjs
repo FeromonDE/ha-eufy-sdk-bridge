@@ -10,6 +10,13 @@ export function createDeviceView(ctx) {
   const unobservable = ctx.unobservableMembers ?? unobservableMembers;
   const { streaming } = ctx.state;
 
+  function enrichDeviceEvent(event, payload = {}) {
+    if (event !== "armingModeChanged" || payload.mode !== undefined) return payload;
+    const sn = payload.deviceSn ?? payload.sn;
+    const mode = ctx.armingModeOverride?.(sn, undefined);
+    return mode === undefined ? payload : { ...payload, mode };
+  }
+
   /**
    * Build the host-facing summary of one device: identity + capabilities + a stream path for a camera.
    *
@@ -21,6 +28,9 @@ export function createDeviceView(ctx) {
     const dev = await eufy.getDevice(sn);
     const m = dev.describe();
     const isCamera = m.capabilities.includes("camera") || m.capabilities.includes("video");
+    const state = propertyState(dev);
+    const modeOverride = ctx.armingModeOverride?.(m.sn, state.armingMode);
+    if (modeOverride !== undefined) state.armingMode = modeOverride;
     return {
       sn: m.sn,
       name: m.name, // owner's device name (e.g. "Dining room"), from device_name
@@ -28,7 +38,7 @@ export function createDeviceView(ctx) {
       modelName: m.modelName, // product display name (e.g. "Indoor Cam Pan & Tilt")
       codec: m.codec,
       capabilities: m.capabilities,
-      state: propertyState(dev), // live property values ({ battery: 74, motion: false, … })
+      state, // live property values ({ battery: 74, motion: false, … })
       ...decodedReadings(dev, m),
       stream: isCamera ? `/stream/${m.sn}` : undefined,
       streaming: isCamera ? streaming.has(m.sn) : undefined, // live P2P feed active right now?
@@ -162,5 +172,5 @@ export function createDeviceView(ctx) {
     );
   }
 
-  return { describeDevice, propertyState, propertySpecs, decodedProperties, deviceList };
+  return { describeDevice, enrichDeviceEvent, propertyState, propertySpecs, decodedProperties, deviceList };
 }
