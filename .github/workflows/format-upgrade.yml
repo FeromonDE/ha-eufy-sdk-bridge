@@ -1,0 +1,34 @@
+name: Format upgrade branch
+
+on:
+  push:
+    branches: [upgrade/upstream-0.4.0]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upgrade/upstream-0.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run format
+      - name: Commit formatting
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "Already formatted"
+          else
+            git commit -m "style: format 0.4.0 upgrade"
+            git push origin HEAD:upgrade/upstream-0.4.0
+          fi
