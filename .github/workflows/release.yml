@@ -1,0 +1,72 @@
+name: Release versioned GHCR image
+
+# Docker builds and publishes :latest first; this workflow attaches a stable
+# version tag to that exact multi-architecture manifest without rebuilding.
+on:
+  workflow_run:
+    workflows: ["Docker"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+concurrency:
+  group: bridge-versioned-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMAGE: ghcr.io/feromonde/ha-eufy-sdk-bridge
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out the successfully built source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Confirm source is still main and read version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')"
+          if [[ "$SOURCE_SHA" != "$MAIN_SHA" ]]; then
+            echo "Newer main commit exists. Skipping an out-of-date image."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="$(node -p "require('./package.json').version")"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version: $VERSION"; exit 1; }
+          echo "current=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish version-specific Docker manifest and release
+        if: steps.version.outputs.current == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG already released. Keeping the existing immutable release."
+            exit 0
+          fi
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools inspect "$IMAGE:latest" >/dev/null
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE:latest"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null
+          NOTES="$(printf 'Versioned multi-architecture Docker image:\n\n\`%s:%s\`\n\nPlatforms: linux/amd64, linux/arm64.\nSource commit: %s\n\nRun with: \`docker pull %s:%s\`\n' "$IMAGE" "$VERSION" "$SOURCE_SHA" "$IMAGE" "$VERSION")"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "Eufy SDK Bridge v$VERSION" --notes "$NOTES"
