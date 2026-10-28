@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { streamClientFor, dropStreamClient, isSupersededStreamClient } from "../streams.mjs";
 import { createAnnexBNormalizer } from "./annexb-stream.mjs";
+import { onBatteryPower } from "./power.mjs";
 
 function json(res, code, body) {
   const s = JSON.stringify(body);
@@ -144,10 +145,9 @@ export function createHttpHandler(ctx) {
         const device = await eufy.getDevice(sn);
         const cam = device.camera?.();
         if (!cam) return json(res, 404, { error: "no camera on this device" });
-        // A battery-capable camera pays a radio wake for every still; one without that capability does not.
-        // Same test the idle watcher uses (see stream-idle.mjs), so "which cameras are expensive" is
-        // decided in one way.
-        const onBattery = (device.describe?.()?.capabilities ?? []).includes("battery");
+        // Use the SDK's power classification: some wired cameras expose battery capability.
+        const desc = device.describe?.();
+        const onBattery = onBatteryPower(desc?.model, desc?.capabilities);
         let wantLive = cfg.snapshotLive === "auto" ? !onBattery : cfg.snapshotLive;
         switch (snapshotMode) {
           case "live":
@@ -293,7 +293,8 @@ export function createHttpHandler(ctx) {
       try {
         lease = openStreamClient(sn, cfg); // its OWN P2P session — see streams.mjs
         const client = await lease;
-        const cam = (await client.getDevice(sn)).camera?.();
+        const dev = await client.getDevice(sn);
+        const cam = dev.camera?.();
         if (!cam?.openReadable) {
           res.off("close", onGone);
           return json(res, 404, { error: "no live video on this device" });
@@ -322,7 +323,11 @@ export function createHttpHandler(ctx) {
         let feeds = openFeeds.get(sn);
         if (!feeds) openFeeds.set(sn, (feeds = new Set()));
         // `peers` lets the idle sweep close every open request for this camera, not only this one.
-        const entry = { feed, startedAt: Date.now(), lease, peers: feeds };
+        // Each active feed carries its power tier for the idle sweep. Unknown stays battery
+        // to preserve the existing power-saving behavior on devices without a manifest.
+        const desc = dev.describe?.();
+        const battery = desc ? onBatteryPower(desc.model, desc.capabilities) : true;
+        const entry = { feed, startedAt: Date.now(), lease, peers: feeds, battery };
         feeds.add(entry);
         if (!streaming.has(sn)) ctx.broadcast({ event: "streamState", deviceSn: sn, active: true });
         streaming.add(sn);
