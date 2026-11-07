@@ -17,7 +17,8 @@ process.env.BRIDGE_STREAM_CONSUMER_LOG_MS = "0";
 const { createHttpHandler } = await import("../src/http-routes.mjs");
 const SN = "T8000P0000000001";
 const HUB = "T8000P0000000000";
-const syntheticJpeg = (label) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from(label), Buffer.from([0xff, 0xd9])]);
+const syntheticJpeg = (label) =>
+  Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from(label), Buffer.from([0xff, 0xd9])]);
 
 /** SDK boundary fixture retains product, category, owner name, parent channel and capabilities. */
 async function setup(t, { views = [0, 1], legacy = false, model = "T8E00", liveOnly = false } = {}) {
