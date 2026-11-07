@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - package.json
+      - .github/workflows/publish-on-merge-v0.7.2.yml
 
 permissions:
   contents: write
@@ -43,7 +44,7 @@ jobs:
       - name: Build and publish amd64 and arm64
         if: steps.version.outputs.publish == 'true'
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/ha-eufy-sdk-bridge
+          IMAGE: ghcr.io/feromonde/ha-eufy-sdk-bridge
         run: |
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
