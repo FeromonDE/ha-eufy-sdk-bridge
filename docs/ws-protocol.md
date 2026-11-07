@@ -41,8 +41,12 @@ Ask what the login needs right now.
 // →
 { "id": 1, "cmd": "auth.status" }
 // ←
-{ "id": 1, "ok": true, "auth": { "state": "ok" } }
+{ "id": 1, "ok": true, "auth": { "state": "ok" }, "bridgeId": "3f2a…" }
 ```
+
+`bridgeId` is this bridge install's stable id (a UUID kept in the data dir beside the session file). It is
+the same whatever address the bridge is reached at, so a host can tell the same bridge added twice (e.g.
+discovered at `172.30.32.1` and added by LAN IP) from two bridges. `hello` and `/healthz` carry it too.
 
 `auth` is one of:
 
@@ -104,7 +108,8 @@ Every device the account exposes. _(Requires `auth.state == "ok"`.)_
       "codec": "camera",
       "capabilities": ["video","snapshot","motion","camera","rtsp","battery","light","ptz","audio","info"],
       "state": { "battery": 74, "motion": false, "light": true, "statusLed": true },
-      "stream": "/stream/EXAMPLE-CAM-0001"
+      "stream": "/stream/EXAMPLE-CAM-0001",
+      "power": "wired"
     },
     { "sn": "EXAMPLE-SENSOR-0002", "name": "Entry Sensor", "model": "T8900",
       "modelName": "Entry Sensor", "codec": "sensor",
@@ -120,6 +125,9 @@ Every device the account exposes. _(Requires `auth.state == "ok"`.)_
 - `stream` is present only on devices with live video (cameras/doorbells).
 - `streaming` (cameras/doorbells only) is `true` while a live P2P feed is actually open right now — the
   same signal the `streamState` event carries, so a frontend can seed a "Streaming" sensor from the list.
+- `power` (cameras/doorbells only) is `"battery"` or `"wired"`, decided the way the SDK decides it for its own
+  live-media budget. The `battery` capability alone is not the answer: mains-only models (the T8410 above) still
+  carry it.
 - `canReboot` is `true` on HomeBase/station devices, which accept `device.reboot`.
 - A device that failed to resolve appears as `{ "sn": "…", "error": "…" }`.
 
@@ -191,6 +199,10 @@ _(Requires auth.)_
 Map an entry to an entity: `writable` + `bool` → **switch**, `enum` → **select** (`enumValues` = raw→label),
 `number` → **number** (`unit`/`kind` for display), everything else → **sensor**. Pair with the live value
 from `state` (same `name`).
+
+`reported` (eufy-sdk 0.5+) says whether the device has reported that property yet. `false` means it never
+has, so a read-only one would show no value; a host can keep it out of view (the integration creates it
+disabled). It flips to `true` on the poll that first carries the value. Absent on an older SDK.
 
 The response also includes `decodedProperties: { bound, details }`. Each detail retains the SDK's
 `capability`, `accessor` and `reads` descriptors without re-deriving types or enum labels. `bound: false`
@@ -308,7 +320,11 @@ values on the order of minutes, so intervals below ~1 min mostly add load withou
 ### `stream.start`
 
 Returns the URLs for a camera's live video. **Does not open the camera** — connecting to the URL is
-what starts it; disconnecting stops it. _(Requires auth.)_
+what starts it; disconnecting stops it. _(Requires auth.)_ The host is `BRIDGE_SELF_HOST` and the RTSP
+port is `GO2RTC_RTSP_PORT` (default `8554`), the port the bundled go2rtc listens on.
+
+An optional integer `view` selects an SDK-advertised optical view. An unsupported view or a value of
+another type is refused. Omission retains the existing primary source and URLs. Selection opens no media.
 
 ```jsonc
 // →
@@ -388,7 +404,7 @@ Complete a pending Solix 2FA (only when `state == "2fa"`). The code is never log
 | `ready` | `{ schemaVersion }`                     | login complete + devices/go2rtc up |
 
 ```json
-{ "event": "hello", "schemaVersion": 1, "auth": { "state": "ok" } }
+{ "event": "hello", "schemaVersion": 1, "bridgeId": "3f2a…", "auth": { "state": "ok" } }
 { "event": "auth", "state": "require_2fa", "method": "email" }
 { "event": "ready", "schemaVersion": 1 }
 ```
@@ -439,12 +455,58 @@ Fired when a camera's live P2P feed opens (`active: true`) or is torn down / idl
 
 ## Sibling HTTP endpoints
 
-| method + path        | returns                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| `GET /healthz`       | `{ ok, schemaVersion, auth: { state }, streaming: [sn,…] }` — always available (even before auth) |
-| `GET /snapshot/<sn>` | a JPEG still (`image/jpeg`). _Requires auth._                                                     |
-| `GET /stream/<sn>`   | live Annex-B H.264/H.265 (`video/H264`) — what go2rtc pulls. _Requires auth._                     |
-| `GET /clip/<sn>`     | the latest detection's HomeBase 2 recording (`video/mp4`). _Requires auth._                       |
+### Optical views
+
+Camera summaries in `devices.list` and `device.state` additionally carry `views`, derived from the
+bound SDK camera's `views()` inventory. An SDK without that inventory exposes only the primary view.
+The bridge does not infer views from camera models, lens names or station topology. For example:
+
+```json
+{
+  "sn": "EXAMPLE-CAM-0001",
+  "stream": "/stream/EXAMPLE-CAM-0001",
+  "views": [
+    {
+      "view": 0,
+      "id": "EXAMPLE-CAM-0001",
+      "stream": "/stream/EXAMPLE-CAM-0001",
+      "snapshot": "/snapshot/EXAMPLE-CAM-0001"
+    },
+    {
+      "view": 1,
+      "id": "EXAMPLE-CAM-0001_view_1",
+      "stream": "/stream/EXAMPLE-CAM-0001?view=1",
+      "snapshot": "/snapshot/EXAMPLE-CAM-0001?view=1"
+    }
+  ]
+}
+```
+
+`id` names the generated go2rtc source, also used as the RTSP path. View 0 keeps the camera serial and
+the existing endpoints. Additional sources use `<sn>_view_<view>`; the HTTP stream and snapshot paths
+select that view with `?view=<view>`. HTTP accepts one canonical non-negative safe integer selector,
+answers 400 for malformed/repeated selectors, and 404 for views the current SDK does not advertise.
+Each stream forwards its selection to `camera.openReadable()` and releases only its own consumer.
+The existing `streaming` summary, `streamState` events and battery-idle policy remain per physical device.
+
+Snapshots combine `view` with the existing `mode` policy, for example `?view=1&mode=stored`. Secondary
+views use their own persisted live picture and never fall back to an unselected event thumbnail or
+another view's still. With no image for that view, the endpoint returns 404. A successful secondary live
+snapshot is retained for later stored-mode reads; a running stream also retains its selected picture.
+`mode=live` retains its existing same-view fallback behavior. Event images and clips remain per device.
+
+This additive schema-1 extension does not change the SDK dependency pin, transport selection, media
+codec, audio support or concurrency limits. Actual extra views require an SDK route that advertises
+and implements them; registration alone does not establish hardware support for a different topology.
+
+### Endpoint reference
+
+| method + path        | returns                                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `GET /healthz`       | `{ ok, schemaVersion, bridgeId, auth: { state }, streaming: [sn,…] }` — always available (even before auth) |
+| `GET /snapshot/<sn>` | a JPEG still (`image/jpeg`). _Requires auth._                                                               |
+| `GET /stream/<sn>`   | live Annex-B H.264/H.265 (`application/octet-stream`) — what go2rtc pulls. _Requires auth._                 |
+| `GET /clip/<sn>`     | the latest detection's HomeBase 2 recording (`video/mp4`). _Requires auth._                                 |
 
 The bridge does not infer cloud-poll health from device-event silence; `ok` means the HTTP endpoint answered.
 

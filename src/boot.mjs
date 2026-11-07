@@ -4,6 +4,13 @@
 // kicked off after `ready` so they don't hold up serving.
 import { spawn } from "node:child_process";
 import { writeGo2rtcConfig } from "../go2rtc-config.mjs";
+import { pushFieldSummary } from "./push-trace.mjs";
+import { RECORD_TRIGGER_PERSON } from "./config.mjs";
+
+// #35 night-vision upgrade timings. The person classification of a recording lands a few seconds after
+// the motion push, so wait before reading the record; dedup a real person push for the same device.
+const PERSON_UPGRADE_DELAY_MS = Number(process.env.EUFY_PERSON_FROM_RECORD_DELAY_MS) || 4000;
+const PERSON_DEDUP_MS = 20_000;
 
 /**
  * One-shot boot diagnostic: print each camera's station + P2P channel so a same-model collision is
@@ -83,17 +90,38 @@ export function createBoot(ctx) {
         eufy.on("p2pConnect", (sn) => dbg(`p2pConnect station=${sn}`));
         eufy.on("p2pClose", (sn) => dbg(`p2pClose station=${sn}`));
         eufy.on("commandAck", (info) => dbg(`commandAck ${JSON.stringify(info)}`));
+        eufy.on("push", (ev) => dbg(pushFieldSummary(ev)));
       }
       eufy.on("push", (ev) => ctx.noteRecording?.(ev)); // the recording a detection named, for /clip
+      // #35 night-vision upgrade: a camera unsure at trigger time pushes `motion`, then the recording is
+      // classified person. When EUFY_PERSON_FROM_RECORD is on, a `motion` push schedules a read of the
+      // freshest record; if its trigger_type is the person value, re-emit `personDetected`. `recentPerson`
+      // dedups against a real person push for the same device (so a genuine person event isn't doubled).
+      const recentPerson = new Map();
+      const upgradeMotionToPerson = async (sn) => {
+        if (!sn || Date.now() - (recentPerson.get(sn) ?? 0) < PERSON_DEDUP_MS) return;
+        const trigger = await ctx.latestTriggerType?.(sn);
+        if (trigger !== RECORD_TRIGGER_PERSON) return;
+        if (Date.now() - (recentPerson.get(sn) ?? 0) < PERSON_DEDUP_MS) return; // re-check after the await
+        recentPerson.set(sn, Date.now());
+        ctx.eventLog(`person-from-record: ${sn} recording trigger_type=${trigger} (person) → emitting personDetected`);
+        ctx.broadcast({
+          event: "personDetected",
+          ...ctx.enrichPersonName("personDetected", { deviceSn: sn, person_id: -1, source: "record-upgrade" }),
+        });
+      };
       for (const e of FORWARDED_EVENTS)
         eufy.on(e, (payload) => {
           const detection = DETECTION_EVENTS.has(e);
+          if (e === "personDetected" && payload?.deviceSn) recentPerson.set(payload.deviceSn, Date.now());
           if (detection) {
             ctx.noteDetection(payload?.deviceSn);
             // Local-storage accounts get no push thumbnail, so pull the fresh event cover from HomeBase
             // storage and (if it changed) nudge HA to re-fetch — otherwise "Last event" stays frozen.
             ctx.onDetectionRefresh?.(payload?.deviceSn);
           }
+          if (e === "motion" && cfg.personFromRecord && payload?.deviceSn)
+            setTimeout(() => void upgradeMotionToPerson(payload.deviceSn), PERSON_UPGRADE_DELAY_MS);
           // Narrow event trace (on by default): a push/semantic event arrived — say what it is, which
           // device, whether it's a detection (which is what makes HA refresh "Last event"), and how many
           // frontend clients it reaches. 0 clients means HA is not connected, so nothing updates there.
@@ -106,9 +134,7 @@ export function createBoot(ctx) {
                 `${clients === 0 ? " (NONE CONNECTED — HA will not update)" : ""}`,
             );
           }
-          const enriched =
-            ctx.enrichDeviceEvent?.(e, ctx.enrichPersonName(e, payload)) ?? ctx.enrichPersonName(e, payload);
-          ctx.broadcast({ event: e, ...enriched });
+          ctx.broadcast({ event: e, ...ctx.enrichPersonName(e, payload) });
         });
       // Use the same capability-based view the WS/HA side uses: a camera is a device describeDevice gave
       // a `stream`, NOT deviceClass==="camera" (the SDK downgrades a camera behind a HomeBase to "other"),

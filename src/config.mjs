@@ -53,6 +53,10 @@ export const DETECTION_EVENTS = new Set([
   "cryingDetected",
 ]);
 
+// HomeBase 3 `history_record_info.trigger_type`: 2 = motion recording, 4 = person recording (bridge #35,
+// confirmed against a person-only vs all-motion camera pair). Drives the opt-in night-vision upgrade.
+export const RECORD_TRIGGER_PERSON = 4;
+
 export const PUSH_STALL_MS = 5 * 60_000; // push down (or never up) this long ⇒ events are dead ⇒ recover
 export const SUSPEND_RELEASE_MS = 30_000; // no /stream pull this long while suspended ⇒ nobody's watching
 export const STREAM_FAIL_BACKOFF_MAX_MS = 5 * 60_000; // cap on the exponential backoff after failed opens
@@ -67,8 +71,7 @@ export function loadConfig(env = process.env) {
     email: env.EUFY_EMAIL,
     password: env.EUFY_PASSWORD,
     country: env.EUFY_COUNTRY || "GB",
-    // Friendly actor label written into Eufy's command attribution/history.
-    // Unset → SDK falls back to the login email local-part.
+    // Preserve the actor shown in the Eufy app's command history (FeromonDE fork).
     accountName: env.EUFY_ACCOUNT_NAME?.trim() || undefined,
     host: env.BRIDGE_HOST || "0.0.0.0",
     port: Number(env.BRIDGE_PORT || 3000),
@@ -83,6 +86,12 @@ export function loadConfig(env = process.env) {
     // instead of the one bundled here. Default ON to match existing behavior; set GO2RTC_ENABLE=0 to skip
     // spawning it.
     go2rtcEnable: env.GO2RTC_ENABLE == null ? true : truthy(env.GO2RTC_ENABLE),
+    // The ports go2rtc listens on. The generated go2rtc.yaml, the `stream.start` RTSP URL and the
+    // consumer probe all read these, so moving go2rtc off a port another go2rtc already holds (Frigate's,
+    // or the go2rtc add-on beside a host-networked bridge) is one variable, not a hand-edited YAML.
+    go2rtcApiPort: positiveInt(env.GO2RTC_API_PORT) ?? 1984,
+    go2rtcRtspPort: positiveInt(env.GO2RTC_RTSP_PORT) ?? 8554,
+    go2rtcWebrtcPort: positiveInt(env.GO2RTC_WEBRTC_PORT) ?? 8555,
     selfHost: env.BRIDGE_SELF_HOST || "127.0.0.1",
     // Cloud poll interval (ms). Unset → the SDK default (600000 = 10 min). Changeable live via the
     // config.set WS command. 0 disables polling.
@@ -124,9 +133,23 @@ export function loadConfig(env = process.env) {
     clipSettleMs: env.CLIP_SETTLE_MS != null ? Number(env.CLIP_SETTLE_MS) : 30_000,
     // Event pre-warm: the SDK can speculatively open a camera's P2P session on a high-intent event
     // (doorbell/person/pet/package) so a following live view starts instantly. OFF by default here — it
-    // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to enable the SDK's
-    // default pre-warm events.
+    // holds a battery camera's radio open for ~28s per event. Set BRIDGE_PREWARM=1 to pre-warm on the four
+    // events named in client.mjs (the SDK pre-warms on none unless the caller lists them).
     prewarm: truthy(env.BRIDGE_PREWARM),
+    // "Last event" local-cover refresh over P2P. On every detection the bridge queries the HomeBase's
+    // history DB + local cover (and warms the face roster + last-event images at startup, and auto-heals
+    // /event-image). On a camera with no readable local storage (e.g. a standalone mains T8423, no
+    // HomeBase) those queries return nothing yet still fire ~26 P2P requests over ~4.5 min per detection —
+    // which can hammer the camera into going offline. Set EUFY_LOCAL_EVENT_REFRESH=0 to skip them all
+    // (the push-thumbnail path and live streaming are unaffected). Default ON. See bridge #139.
+    localEventRefresh: env.EUFY_LOCAL_EVENT_REFRESH == null ? true : truthy(env.EUFY_LOCAL_EVENT_REFRESH),
+    // Night-vision person-vs-motion: a camera unsure at trigger time pushes `motion` (3101) and only tags
+    // the clip "person" after it analyses the recording — so HA shows motion for what the app calls a
+    // person. When on, a `motion` push triggers a read of the freshest `history_record_info` record and,
+    // if its `trigger_type` says person, the bridge re-emits `personDetected` (name "Unknown" — HB3 records
+    // carry no person_id). Confirmed on HomeBase 3 (trigger_type 2=motion, 4=person); HB2's values are
+    // unverified, so this is OFF by default. See bridge #35.
+    personFromRecord: truthy(env.EUFY_PERSON_FROM_RECORD),
     // Optional Anker Solix support — a SEPARATE Anker account (its own login + device backend), enabled
     // only when both SOLIX_EMAIL and SOLIX_PASSWORD are set. Independent of the eufy client; its own
     // persisted session file. Country falls back to the eufy country.
@@ -154,6 +177,8 @@ export function loadConfig(env = process.env) {
   // pushStore the SDK falls back to MemoryFcmStore and re-registers a fresh token on every restart —
   // wasted work, and it's what makes a same-identity collision bite rather than self-correct (issue #30).
   cfg.pushSession = path.join(path.dirname(cfg.session), ".eufy-fcm.json");
+  // This install's stable identity (see bridge-id.mjs), in the same data dir.
+  cfg.bridgeIdFile = path.join(path.dirname(cfg.session), ".bridge-id");
 
   const DEBUG = truthy(env.BRIDGE_DEBUG);
   const DEBUG_P2P = truthy(env.BRIDGE_DEBUG_P2P);

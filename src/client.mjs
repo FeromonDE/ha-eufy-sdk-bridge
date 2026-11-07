@@ -3,15 +3,10 @@
 // needs other modules (error → session recovery, push liveness) lives in server.mjs, after ctx is whole.
 import { EufyMega, FileSessionStore, FileFcmStore, ConsoleLogger } from "@mega-yfue/eufy-sdk";
 
+// Keep the originating station serial for raw P2P arming-mode frame 1151, whose public
+// SDK 'p2p' event does not carry stationSn. This also works with SDK 0.5.0.
 export const BRIDGE_P2P_STATION_FRAME = "bridgeP2PStationFrame";
 
-/**
- * Preserve the station serial on raw P2P frames.
- *
- * SDK 0.4.0 still publishes the public `p2p` event as only the frame, while the internal callback
- * receives `(stationSn, frame)`. Guard-mode cmd 1151 is station-scoped, so keep that identity at the
- * bridge boundary without changing the SDK's public event contract.
- */
 export function preserveP2PStationContext(eufy) {
   const original = eufy?.onP2PFrame;
   if (typeof original !== "function") return false;
@@ -20,6 +15,17 @@ export function preserveP2PStationContext(eufy) {
     return original.call(this, stationSn, frame);
   };
   return true;
+}
+
+/**
+ * The high-intent events BRIDGE_PREWARM=1 opens a camera's session on, by their SDK `DeviceEventMap`
+ * names: a ring, a person, a pet, a package. Each is the moment a live view usually follows.
+ */
+export const PREWARM_EVENTS = Object.freeze(["doorbellPress", "personDetected", "petDetection", "packageDelivered"]);
+
+/** The `prewarmEvents` the SDK gets: the four high-intent events when pre-warm is on, none when it is off. */
+export function prewarmEventsFor(prewarm) {
+  return prewarm ? [...PREWARM_EVENTS] : [];
 }
 
 /**
@@ -45,14 +51,15 @@ export function createEufy({ cfg, DEBUG_P2P }) {
     openudid: cfg.openudid,
     pollMs: cfg.pollMs, // undefined → SDK default; changeable live via config.set
     // Event pre-warm is OFF by default (`[]` = no event opens P2P speculatively) so a battery camera's
-    // radio isn't held open ~28s per doorbell/person/pet/package event. BRIDGE_PREWARM=1 → undefined,
-    // which lets the SDK use its default high-intent pre-warm events.
-    prewarmEvents: cfg.prewarm ? undefined : [],
+    // radio isn't held open ~28s per doorbell/person/pet/package event. BRIDGE_PREWARM=1 names those
+    // four events: the SDK pre-warms on no event unless the caller lists it (`undefined` is an empty
+    // set there, see issue #145), so the bridge has to say which ones.
+    prewarmEvents: prewarmEventsFor(cfg.prewarm),
     logger: DEBUG_P2P ? new ConsoleLogger() : undefined,
   });
   memoizeGetDevice(eufy);
   if (!preserveP2PStationContext(eufy)) {
-    console.warn("[bridge] SDK raw P2P station context hook unavailable — realtime guard-mode 1151 disabled");
+    console.warn("[bridge] SDK P2P station hook missing: guard-mode realtime fallback disabled");
   }
   return eufy;
 }
