@@ -24,10 +24,13 @@ export function createState() {
 
     clients: new Set(), // connected WS clients (broadcast targets)
     streaming: new Set(), // sns with a live P2P feed piping right now
-    armingOverrides: new Map(), // sn -> { mode, at }; fast arming truth while slower cloud state converges
+    armingOverrides: new Map(), // fast P2P/cloud arming truth while cloud state converges
 
     // person_id -> { name, familiar } — the HomeBase edge-AI face roster, built once at startup.
     faceNames: new Map(),
+
+    // sn -> { jpeg, at } — the retained push thumbnail and when it first appeared (stored-thumbnail.mjs).
+    storedThumbSeen: new Map(),
 
     // ── live-stream idle auto-off bookkeeping ──
     lastDetect: new Map(), // sn -> ms of the most recent detection
