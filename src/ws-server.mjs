@@ -5,6 +5,8 @@
 import { WebSocketServer } from "ws";
 import { listLightEffects } from "@mega-yfue/eufy-sdk";
 import { SOLIX_CONTROLS, SOLIX_DISABLED } from "./solix.mjs";
+import { redactSecrets } from "./redact.mjs";
+import { cameraViews, cameraView, validView } from "./camera-views.mjs";
 
 /**
  * Arming writes use the bound arming capability directly. This avoids the generic property path's
@@ -46,11 +48,22 @@ export function createWsServer(ctx, httpServer) {
   const { flags, clients } = ctx.state;
 
   const send = (ws, obj) => {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+    if (ws.readyState === ws.OPEN) ws.send(redactSecrets(JSON.stringify(obj)));
   };
   const broadcast = (obj) => {
-    const s = JSON.stringify(obj);
+    const s = redactSecrets(JSON.stringify(obj));
     for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
+  };
+
+  // The device as seen through the session of a /stream that is live for it, or null when none is.
+  const liveDeviceFor = async (sn) => {
+    const lease = ctx.state.activeStreams?.get(sn)?.lease;
+    if (!lease) return null;
+    try {
+      return await (await lease).getDevice(sn);
+    } catch {
+      return null; // that session failed meanwhile: the control client takes the command
+    }
   };
 
   // The smart-light effect gallery is account-wide and costs several HTTP round-trips to enumerate,
@@ -62,7 +75,7 @@ export function createWsServer(ctx, httpServer) {
     clients.add(ws);
     // On connect, tell the client the schema AND the current auth state, so a frontend knows immediately
     // whether it must drive a 2FA/captcha step before anything else works.
-    send(ws, { event: "hello", schemaVersion: SCHEMA_VERSION, auth: ctx.authStatus() });
+    send(ws, { event: "hello", schemaVersion: SCHEMA_VERSION, bridgeId: ctx.bridgeId, auth: ctx.authStatus() });
     ws.on("close", () => clients.delete(ws));
     ws.on("message", (raw) => handleMessage(ws, raw).catch((e) => console.error("[bridge] ws:", e)));
   });
@@ -109,7 +122,7 @@ export function createWsServer(ctx, httpServer) {
       switch (cmd) {
         // ── auth ──
         case "auth.status":
-          return reply({ auth: ctx.authStatus() });
+          return reply({ auth: ctx.authStatus(), bridgeId: ctx.bridgeId });
         case "auth.submit": {
           // A 2FA code (`code`) or a captcha answer (`captcha`). The pending id/token is held in the SDK.
           if (msg.captcha != null) await ctx.applyLogin(await eufy.solveCaptcha(String(msg.captcha)));
@@ -169,26 +182,44 @@ export function createWsServer(ctx, httpServer) {
           const args = Array.isArray(msg.args) ? msg.args : [];
           const dev = await eufy.getDevice(msg.sn);
           // Capability surfaces that expose actions. Add more accessors here as needed.
-          const surfaces = [dev.smartLight?.(), dev.camera?.(), dev.lock?.(), dev.siren?.(), dev.ptz?.()].filter(
-            Boolean,
-          );
+          const ptz = dev.ptz?.();
+          const surfaces = [
+            dev.smartLight?.(),
+            dev.camera?.(),
+            dev.lock?.(),
+            dev.siren?.(),
+            ptz,
+            dev.smartDrop?.(),
+          ].filter(Boolean);
           // A dotted action walks a sub-API namespace: `preset.goto` is `ptz().preset().goto(id)`.
           // Every segment before the leaf ANSWERS — it hands back the namespace without acting — so it
           // takes no arguments; only the leaf is called with `args`.
           const path = action.split(".");
           const leaf = path.pop();
           let target = surfaces.find((s) => typeof s?.[path[0] ?? leaf] === "function");
+          // A PTZ command for a camera that is streaming goes through the stream's own P2P session, which is
+          // connected and has the camera awake. The control client keeps a session of its own, and on a
+          // battery camera over 4G that one has usually dropped (idle) or the camera slept: reconnecting
+          // takes ~30 s, past the caller's reply timeout, so the camera seemed not to turn at all.
+          let via = "";
+          if (target && target === ptz) {
+            const livePtz = (await liveDeviceFor(msg.sn))?.ptz?.();
+            if (typeof livePtz?.[path[0] ?? leaf] === "function") {
+              target = livePtz;
+              via = " via the live stream's session";
+            }
+          }
           for (const seg of path) target = typeof target?.[seg] === "function" ? target[seg]() : undefined;
           if (typeof target?.[leaf] !== "function") return fail(`no action '${action}' on ${msg.sn}`);
           const t0 = Date.now();
-          dbg(`device.action → ${action} sn=${msg.sn} args=${JSON.stringify(args)}`);
+          dbg(`device.action → ${action} sn=${msg.sn} args=${JSON.stringify(args)}${via}`);
           try {
             const result = await target[leaf](...args);
-            dbg(`device.action OK ${action} sn=${msg.sn} (${Date.now() - t0}ms)`);
+            dbg(`device.action OK ${action} sn=${msg.sn} (${Date.now() - t0}ms)${via}`);
             return reply({ result: result ?? null });
           } catch (e) {
             console.error(
-              `[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms): ${e?.name ?? "Error"}: ${e?.message ?? e}`,
+              `[bridge] device.action FAILED ${action} sn=${msg.sn} (${Date.now() - t0}ms)${via}: ${e?.name ?? "Error"}: ${e?.message ?? e}`,
             );
             throw e;
           }
@@ -231,13 +262,21 @@ export function createWsServer(ctx, httpServer) {
           eufy.setPollInterval(ms);
           return reply({ pollMs: eufy.pollIntervalMs });
         }
-        case "stream.start":
+        case "stream.start": {
+          const view = msg.view === undefined ? 0 : msg.view;
+          if (!validView(view)) throw new RangeError("view must be a non-negative safe integer");
+          if (msg.view !== undefined) {
+            const camera = (await eufy.getDevice(msg.sn)).camera?.();
+            if (!camera || !cameraViews(camera).includes(view)) throw new RangeError("unsupported camera view");
+          }
+          const source = cameraView(msg.sn, view);
           // Returns URLs; does NOT open the camera — the media connection does that.
           return reply({
-            path: `/stream/${msg.sn}`,
-            http: `http://${cfg.selfHost}:${cfg.port}/stream/${msg.sn}`,
-            rtsp: `rtsp://${cfg.selfHost}:8554/${msg.sn}`,
+            path: source.stream,
+            http: `http://${cfg.selfHost}:${cfg.port}${source.stream}`,
+            rtsp: `rtsp://${cfg.selfHost}:${cfg.go2rtcRtspPort}/${source.id}`,
           });
+        }
         case "stream.stop":
           return reply({}); // advisory; the media connection is the real signal
 
