@@ -60,7 +60,7 @@ export function createEufy({ cfg, DEBUG_P2P }) {
   });
   memoizeGetDevice(eufy);
   if (!preserveP2PStationContext(eufy)) {
-    console.warn('[bridge] SDK P2P station hook missing: guard-mode realtime fallback disabled');
+    console.warn("[bridge] SDK P2P station hook missing: guard-mode realtime fallback disabled");
   }
   return eufy;
 }
