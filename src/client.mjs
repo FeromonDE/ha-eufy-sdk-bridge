@@ -17,7 +17,6 @@ export function preserveP2PStationContext(eufy) {
   return true;
 }
 
-
 /**
  * The high-intent events BRIDGE_PREWARM=1 opens a camera's session on, by their SDK `DeviceEventMap`
  * names: a ring, a person, a pet, a package. Each is the moment a live view usually follows.
