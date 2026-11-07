@@ -161,13 +161,25 @@ export function createHttpHandler(ctx) {
               ),
             ),
           );
-          const newest = stats.filter(Boolean).sort((a, b) => b.at - a.at)[0];
-          if (!newest) return false;
-          const cached = await fs.promises.readFile(newest.file);
-          ctx.eventLog?.(`/snapshot ${sn} → 200 ${newest.label} (${cached.length}B, from disk; ${why})`);
-          res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
-          res.end(cached);
-          return true;
+          // Never return a corrupt legacy cache file just because its mtime is newer.
+          // Fall back to the next valid JPEG (e.g. a retained event thumbnail) instead.
+          for (const candidate of stats.filter(Boolean).sort((a, b) => b.at - a.at)) {
+            const cached = await fs.promises.readFile(candidate.file);
+            if (
+              cached.length < 4 ||
+              cached[0] !== 0xff ||
+              cached[1] !== 0xd8 ||
+              cached[cached.length - 2] !== 0xff ||
+              cached[cached.length - 1] !== 0xd9
+            ) {
+              continue;
+            }
+            ctx.eventLog?.(`/snapshot ${sn} → 200 ${candidate.label} (${cached.length}B, from disk; ${why})`);
+            res.writeHead(200, { "content-type": "image/jpeg", "content-length": cached.length });
+            res.end(cached);
+            return true;
+          }
+          return false;
         } catch {
           return false;
         }

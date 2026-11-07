@@ -17,6 +17,7 @@ process.env.BRIDGE_STREAM_CONSUMER_LOG_MS = "0";
 const { createHttpHandler } = await import("../src/http-routes.mjs");
 const SN = "T8000P0000000001";
 const HUB = "T8000P0000000000";
+const syntheticJpeg = (label) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from(label), Buffer.from([0xff, 0xd9])]);
 
 /** SDK boundary fixture retains product, category, owner name, parent channel and capabilities. */
 async function setup(t, { views = [0, 1], legacy = false, model = "T8E00", liveOnly = false } = {}) {
@@ -46,7 +47,7 @@ async function setup(t, { views = [0, 1], legacy = false, model = "T8E00", liveO
     snapshotLive: async (opts) => {
       calls.snapshots.push(opts);
       if (calls.snapshotError) throw new Error("synthetic view unavailable");
-      return { jpeg: Buffer.from(`jpeg-optic-${opts?.view ?? 0}`) };
+      return { jpeg: syntheticJpeg(`jpeg-optic-${opts?.view ?? 0}`) };
     },
     snapshotStored: async () => {
       calls.stored++;
@@ -167,8 +168,9 @@ test("go2rtc registers each advertised view without replacing the primary source
   const file = path.join(h.dir, "go2rtc.yaml");
   await writeGo2rtcConfig({ go2rtcConfig: file, selfHost: "127.0.0.1", port: 3000 }, devices);
   const yaml = await fs.readFile(file, "utf8");
-  assert.ok(yaml.includes(`${SN}: ffmpeg:http://127.0.0.1:3000/stream/${SN}#video=copy#async`));
-  assert.ok(yaml.includes(`${SN}_view_1: ffmpeg:http://127.0.0.1:3000/stream/${SN}?view=1#video=copy#async`));
+  assert.ok(yaml.includes(`${SN}: http://127.0.0.1:3000/stream/${SN}`));
+  assert.ok(yaml.includes(`${SN}_view_1: http://127.0.0.1:3000/stream/${SN}?view=1`));
+  assert.equal(yaml.includes("ffmpeg:"), false);
 });
 
 test("stream.start selects an advertised view and returns URLs without opening video", async (t) => {
@@ -189,7 +191,7 @@ test("HTTP selects each optic, retains battery budget and releases only the depa
   const other = await h.pull("?view=1");
   assert.equal(primary.first, "optic-0");
   assert.equal(other.first, "optic-1");
-  assert.deepEqual(h.calls.opens[1].opts, { batteryBudgetMs: 12345, view: 1 });
+  assert.deepEqual(h.calls.opens[1].opts, { batteryBudgetMs: 12345, view: 1, objectMode: true });
   await primary.reader.cancel();
   await until(() => h.calls.opens[0].feed.destroyed);
   assert.equal(h.calls.opens[1].feed.destroyed, false);
@@ -246,12 +248,12 @@ test("optical-view selection retains the HTTP and WebSocket authentication gates
 test("snapshot forwards the selected optic and retains its own still for a stored-mode read", async (t) => {
   const h = await setup(t);
   const response = await fetch(`${h.base}/snapshot/${SN}?view=1&mode=live`);
-  assert.equal(await response.text(), "jpeg-optic-1");
+  assert.ok((await response.text()).includes("jpeg-optic-1"));
   assert.deepEqual(h.calls.snapshots, [{ view: 1 }]);
   h.calls.snapshotError = true;
   const stored = await fetch(`${h.base}/snapshot/${SN}?view=1&mode=stored`);
   assert.equal(stored.status, 200);
-  assert.equal(await stored.text(), "jpeg-optic-1");
+  assert.ok((await stored.text()).includes("jpeg-optic-1"));
   assert.equal(h.calls.snapshots.length, 1);
   assert.equal(h.calls.stored, 0);
 });
@@ -298,5 +300,6 @@ test("selected optical sources retain configured go2rtc ports", async (t) => {
   await writeGo2rtcConfig({ ...h.ctx.cfg, go2rtcConfig: file }, (await h.ws("devices.list")).devices);
   const yaml = await fs.readFile(file, "utf8");
   for (const port of [11984, 18554, 18555]) assert.ok(yaml.includes(`listen: ":${port}"`));
-  assert.ok(yaml.includes(`${SN}_view_1: ffmpeg:http://${h.ctx.cfg.selfHost}:${h.ctx.cfg.port}/stream/${SN}?view=1`));
+  assert.ok(yaml.includes(`${SN}_view_1: http://${h.ctx.cfg.selfHost}:${h.ctx.cfg.port}/stream/${SN}?view=1`));
+  assert.equal(yaml.includes("ffmpeg:"), false);
 });
