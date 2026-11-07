@@ -4,8 +4,10 @@
 // shared lock (`withDbLock`) serialises the face-roster warm, the boot image warm, and every live
 // refresh into one at-a-time queue. Kicked off the boot critical path (they don't gate `ready`).
 import fs from "node:fs";
+import { normalizePushImage } from "@mega-yfue/eufy-sdk";
 import path from "node:path";
 import { rosterEntry, firstJsonObject } from "./faces.mjs";
+import { storedThumbnailSeenAt } from "./stored-thumbnail.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -37,10 +39,16 @@ const LOCAL_REFRESH_MAX_MS = Number(process.env.EVENT_IMAGE_REFRESH_MAX_MS) || 2
 // query the button runs, made automatic. Throttled per device to keep HA's image polling from firing a
 // P2P query every time; env-tunable, 0 disables the auto-heal.
 const AUTOHEAL_COOLDOWN_MS = Number(process.env.EVENT_IMAGE_AUTOHEAL_COOLDOWN_MS ?? 60000);
+// The manual "Refresh Last Event" (event.refresh) answers within this long. The cover query over P2P and the
+// stored-thumbnail follow can run longer than the caller waits (Home Assistant gives the call 15s), so past
+// this point the reply says "not yet" and the refresh finishes in the background, nudging HA if an image
+// lands (ha-eufy-sdk#73).
+const FORCE_REFRESH_ANSWER_MS = Number(process.env.EVENT_IMAGE_FORCE_REFRESH_ANSWER_MS) || 10000;
 
 export function createWarmup(ctx) {
   const { eufy, eventImageDir } = ctx;
   const { faceNames } = ctx.state;
+  const storedThumbSeen = ctx.state.storedThumbSeen ?? new Map();
 
   // ── shared serialisation for every P2P DB read (they share one dbChunk/image stream per session) ──
   let dbChain = Promise.resolve();
@@ -132,6 +140,84 @@ export function createWarmup(ctx) {
     return Number.isFinite(t) ? t : 0;
   }
 
+  // Stations that have answered the direct read at least once. Only a station that never has (a
+  // HomeBase 2 sends nothing back to 10000 on either channel) falls back to the latest-info query, so a
+  // station whose direct read merely dropped once never swaps to the older form.
+  const directReadAnswered = new Set();
+  // Per device, the latest-info crop path last seen, and per station, how many latest-info queries in a
+  // row went unanswered. One that has answered keeps being asked: a T8200 can miss three in a row and
+  // answer the next. One that has not is asked at most every LATEST_INFO_RETRY_MS after three misses, never
+  // given up on: a T8200 silent for a while after the bridge (or the camera) restarts answers again later,
+  // and a station that never answers costs one read per interval.
+  const latestInfoPath = new Map();
+  const latestInfoSilent = new Map();
+  const latestInfoAnswered = new Set();
+  const latestInfoAskedAt = new Map();
+  const LATEST_INFO_MAX_SILENT = 3;
+  const LATEST_INFO_RETRY_MS = Number(process.env.EVENT_IMAGE_LATEST_INFO_RETRY_MS) || 10 * 60_000;
+
+  /** Whether a station silent on the direct read should be asked latest-info now. */
+  function latestInfoDue(stationSn) {
+    if (latestInfoAnswered.has(stationSn) || (latestInfoSilent.get(stationSn) ?? 0) < LATEST_INFO_MAX_SILENT)
+      return true;
+    return Date.now() - (latestInfoAskedAt.get(stationSn) ?? 0) >= LATEST_INFO_RETRY_MS;
+  }
+
+  /**
+   * The latest-info query (inner cmd **10013**, mChannel **0**), as eufy-security-client sends it. It
+   * answers one entry per device, `{device_sn, payload: {crop_hb3_path, event_count}}`, where the direct
+   * read answers nothing at all.
+   *
+   * The crop it names may be a cached "latest" that does not advance with new events, so a device's path
+   * is taken only when it differs from the last one seen, where a taken path counts as seen once its
+   * image is fetched (so a failed fetch is retried); the first one is taken only when no image is on disk
+   * yet. A path that never changes is therefore never persisted over a
+   * newer image. Each entry is logged with its `event_count`, so a log shows whether the path advances.
+   * Answers the records taken, or `undefined` when the station sent no reply. Caller must hold the DB lock.
+   */
+  async function queryLatestInfoCovers(session, accountId, stationSn) {
+    let chunk = "";
+    const onChunk = ({ text }) => (chunk += text);
+    session.on("dbChunk", onChunk);
+    latestInfoAskedAt.set(stationSn, Date.now());
+    session.queryDatabase("history_record_info", { accountId, innerCmd: 10013, channel: 0 });
+    let obj;
+    for (let i = 0; i < 20 && !Array.isArray(obj?.data); i++) {
+      await sleep(200);
+      obj = firstJsonObject(chunk);
+    }
+    session.off?.("dbChunk", onChunk);
+
+    const entries = Array.isArray(obj?.data) ? obj.data : undefined;
+    if (!entries) {
+      if (!latestInfoAnswered.has(stationSn))
+        latestInfoSilent.set(stationSn, (latestInfoSilent.get(stationSn) ?? 0) + 1);
+      return undefined;
+    }
+    latestInfoSilent.delete(stationSn);
+    latestInfoAnswered.add(stationSn);
+    const taken = [];
+    for (const rec of entries) {
+      const dsn = rec?.device_sn;
+      const p = cropPathOf(rec);
+      if (!dsn || !p) continue;
+      const prev = latestInfoPath.get(dsn);
+      const take = prev === undefined ? !fs.existsSync(path.join(eventImageDir, `last-event-${dsn}.jpg`)) : p !== prev;
+      if (!take) latestInfoPath.set(dsn, p); // a taken path counts as seen once its image is fetched
+      ctx.eventLog?.(
+        `latest-info: ${dsn} event_count=${rec.payload?.event_count} crop=${p.split("/").pop()} ` +
+          `(${prev === undefined ? "first seen" : p === prev ? "unchanged" : "advanced"}${take ? ", taken" : ""})`,
+      );
+      if (take) taken.push({ ...rec, viaLatestInfo: true });
+    }
+    return taken;
+  }
+
+  /** Mark a latest-info crop as seen once its image has been fetched. */
+  function noteFetched(rec, filePath) {
+    if (rec?.viaLatestInfo) latestInfoPath.set(rec.device_sn, filePath);
+  }
+
   /**
    * Query each device's LATEST event cover over P2P and return `device_sn -> on-HomeBase cover path`
    * (the plain-JPEG crop the /event-image serves).
@@ -143,9 +229,12 @@ export function createWarmup(ctx) {
    * moved; ch0 also returns nothing on a HomeBase (DB reads live on 255). We then pick, per device, the
    * record with the greatest `start_time` and use its crop path.
    *
+   * A station that has never answered the direct read is asked {@link queryLatestInfoCovers} instead
+   * when this one comes back empty.
+   *
    * Sent twice (the first can be dropped during handshake). Caller must hold the DB lock.
    */
-  async function queryStationCovers(session, accountId) {
+  async function queryStationCovers(session, accountId, stationSn) {
     let chunk = "";
     const onChunk = ({ text }) => (chunk += text);
     session.on("dbChunk", onChunk);
@@ -170,11 +259,18 @@ export function createWarmup(ctx) {
     }
     session.off?.("dbChunk", onChunk);
 
-    const records = parsed?.data ?? firstJsonObject(chunk)?.data ?? [];
-    if (!records.length) {
+    let records = parsed?.data ?? firstJsonObject(chunk)?.data ?? [];
+    let received = `raw ${chunk.length}B received`;
+    if (chunk.length) directReadAnswered.add(stationSn);
+    else if (!directReadAnswered.has(stationSn) && latestInfoDue(stationSn)) {
+      const latest = await queryLatestInfoCovers(session, accountId, stationSn);
+      if (latest) [records, received] = [latest, undefined];
+      else received += "; latest-info unanswered too";
+    }
+    if (!records.length && received) {
       // Diagnostic: distinguish "response never arrived" (chunk empty) from "arrived but unparseable /
       // no data" (chunk large) so a recurring failure points straight at transport vs shape.
-      ctx.eventLog?.(`history query: no records parsed (raw ${chunk.length}B received)`);
+      ctx.eventLog?.(`history query: no records parsed (${received})`);
     }
     // Keep the newest record per device (max start_time), then take its crop path. Ties (or a firmware
     // that omits start_time) fall back to last-wins, matching the old behaviour for that degenerate case.
@@ -187,11 +283,15 @@ export function createWarmup(ctx) {
       if (!dsn) continue;
       const ts = recordTime(rec);
       const p = cropPathOf(rec);
-      const s = seen.get(dsn) ?? { count: 0, maxTs: -1, maxTsHasCrop: false };
+      const s = seen.get(dsn) ?? { count: 0, maxTs: -1, maxTsHasCrop: false, maxTsTrigger: undefined };
       s.count += 1;
       if (ts > s.maxTs) {
         s.maxTs = ts;
         s.maxTsHasCrop = Boolean(p);
+        // trigger_type on the newest record classifies it on HB3 (2=motion, 4=person). Kept even for a
+        // crop-less record (a person recording the station mode didn't push still carries it).
+        const tt = Number(rec?.trigger_type ?? rec?.payload?.trigger_type);
+        s.maxTsTrigger = Number.isFinite(tt) ? tt : undefined;
       }
       seen.set(dsn, s);
       if (!p) continue;
@@ -201,17 +301,48 @@ export function createWarmup(ctx) {
     return { covers: newest, recordCount: records.length, seen };
   }
 
-  /** Request one on-HomeBase cover path over P2P and return its JPEG bytes (≤8s), or undefined. */
-  async function fetchImage(session, filePath, accountId) {
+  /** A station's `p2p_did`, the key a stored image's `eufysecurity:` wrapper is decoded with. */
+  function p2pDidOf(devs, stationSn) {
+    const d = devs.find((x) => (x.sn ?? x.serialNumber) === stationSn);
+    return d?.p2pDid ?? d?.raw?.p2p_did;
+  }
+
+  /**
+   * Request one on-HomeBase cover path over P2P and return its JPEG bytes (≤8s), or undefined. A
+   * HomeBase 2 answers with the image inside the `eufysecurity:` wrapper, which is unwrapped with the
+   * station's `p2p_did` before the JPEG check. A reply that is still not a JPEG after that is logged with
+   * its size and leading wrapper tag, so an image format the SDK cannot decode is told apart from no reply.
+   */
+  async function fetchImage(session, filePath, accountId, p2pDid) {
     const images = new Map();
+    let undecoded;
     const onImage = ({ file, data }) => {
-      if (data?.[0] === 0xff && data?.[1] === 0xd8) images.set(file, data);
+      const image = data ? normalizePushImage(data, p2pDid) : data;
+      if (image?.[0] === 0xff && image?.[1] === 0xd8) images.set(file, image);
+      else if (file === filePath && data) undecoded = Buffer.from(data);
     };
     session.on("image", onImage);
     session.requestImage(filePath, { accountId });
     for (let i = 0; i < 40 && !images.has(filePath); i++) await sleep(200);
     session.off?.("image", onImage);
+    if (!images.has(filePath) && undecoded) {
+      ctx.eventLog?.(
+        `cover reply for ${filePath.split("/").pop()} is not a JPEG after decoding (${undecoded.length}B, starts ${wrapperTag(undecoded)})`,
+      );
+    }
     return images.get(filePath);
+  }
+
+  /**
+   * The leading tag of an image reply: the printable text up to and including its first `:` within 24 bytes
+   * (`v8_eufysecurity:`), else the first 8 bytes as hex. Stops at the first `:`, so the serial and code a
+   * wrapper carries after it are never logged.
+   */
+  function wrapperTag(buf) {
+    const head = buf.subarray(0, 24).toString("latin1");
+    const colon = head.indexOf(":");
+    if (colon > 0 && /^[\x20-\x7e]+$/.test(head.slice(0, colon))) return `"${head.slice(0, colon + 1)}"`;
+    return `0x${buf.subarray(0, 8).toString("hex")}`;
   }
 
   /** Persist bytes to last-event-<sn>.jpg only when they differ from what's on disk; report whether it changed. */
@@ -226,6 +357,35 @@ export function createWarmup(ctx) {
     if (prev && prev.equals(data)) return false;
     fs.writeFileSync(file, data);
     return true;
+  }
+
+  /**
+   * The `trigger_type` of a device's freshest `history_record_info` record, across its connected
+   * station(s), or `undefined` if nothing readable. Used by the night-vision person upgrade (#35): on
+   * HomeBase 3, `2` = motion recording, `4` = person recording. Reuses the cover-refresh DB read and is
+   * serialised against it.
+   */
+  function latestTriggerType(sn) {
+    return withDbLock(async () => {
+      if (!sn) return undefined;
+      try {
+        const sessions = stationSessions();
+        if (!sessions.size) return undefined;
+        const devs = await eufy.getDevices();
+        const accountId = await accountIdOf(devs);
+        let best = { ts: -1, trigger: undefined };
+        for (const [, session] of sessions) {
+          if (!session.isConnected) continue;
+          const { seen } = await queryStationCovers(session, accountId);
+          const s = seen?.get(sn);
+          if (s && s.maxTs > best.ts) best = { ts: s.maxTs, trigger: s.maxTsTrigger };
+        }
+        return best.trigger;
+      } catch (e) {
+        console.error(`[bridge] latestTriggerType for ${sn} failed: ${e?.message ?? e}`);
+        return undefined;
+      }
+    });
   }
 
   /**
@@ -265,15 +425,17 @@ export function createWarmup(ctx) {
       try {
         const devs = await eufy.getDevices();
         const accountId = await accountIdOf(devs);
-        for (const [, session] of await awaitSessions()) {
+        for (const [stationSn, session] of await awaitSessions()) {
           for (let i = 0; i < 30 && !session.isConnected; i++) await sleep(500); // await handshake
           if (!session.isConnected) continue;
 
-          const { covers } = await queryStationCovers(session, accountId);
+          const { covers } = await queryStationCovers(session, accountId, stationSn);
           if (!covers.size) continue;
 
           for (const [dsn, { path: filePath }] of covers) {
-            const data = await fetchImage(session, filePath, accountId);
+            const data = await fetchImage(session, filePath, accountId, p2pDidOf(devs, stationSn));
+            if (data) noteFetched(covers.get(dsn).rec, filePath);
+            else ctx.eventLog?.(`warm: ${dsn} — cover fetch returned no image (crop=${filePath.split("/").pop()})`);
             if (data && persistIfChanged(dsn, data)) {
               console.log(`[bridge] warmed last-event image for ${dsn} (${data.length}B, local)`);
             }
@@ -300,9 +462,9 @@ export function createWarmup(ctx) {
         if (!sessions.size) return false;
         const devs = await eufy.getDevices();
         const accountId = await accountIdOf(devs);
-        for (const [, session] of sessions) {
+        for (const [stationSn, session] of sessions) {
           if (!session.isConnected) continue;
-          const { covers, recordCount, seen } = await queryStationCovers(session, accountId);
+          const { covers, recordCount, seen } = await queryStationCovers(session, accountId, stationSn);
           const entry = covers.get(sn);
           if (!entry) {
             // Diagnostic: did this station return records for this device at all? If it has a newer record
@@ -319,11 +481,12 @@ export function createWarmup(ctx) {
           }
           const filePath = entry.path;
           const crop = filePath.split("/").pop();
-          const data = await fetchImage(session, filePath, accountId);
+          const data = await fetchImage(session, filePath, accountId, p2pDidOf(devs, stationSn));
           if (!data) {
             ctx.eventLog?.(`local refresh: ${sn} — cover fetch returned no image (crop=${crop})`);
             return false;
           }
+          noteFetched(entry.rec, filePath);
           if (persistIfChanged(sn, data)) {
             ctx.eventLog?.(
               `local refresh: ${sn} → last-event image updated (${data.length}B, local) ` +
@@ -371,13 +534,17 @@ export function createWarmup(ctx) {
    * the call are that previous image, so we keep polling instead of taking them as the answer.
    */
   async function refreshStoredSnapshotFor(sn, { waitForNew = false } = {}) {
+    // A retained thumbnail belongs to this detection only if it first appeared after the detection began
+    // and is not the image already persisted then. One seen earlier is a previous event's, and on a
+    // local-storage account the disk may hold a newer HomeBase cover, so it must not be persisted over it
+    // (ha-eufy-sdk-bridge#97). The first-seen record is shared with /event-image, so an image HA's own
+    // fetch saw (and persisted) between polls still counts as new.
+    const since = Date.now();
     let before;
-    if (waitForNew) {
-      try {
-        before = fs.readFileSync(path.join(eventImageDir, `last-event-${sn}.jpg`));
-      } catch {
-        // nothing persisted yet: any image is new
-      }
+    try {
+      before = fs.readFileSync(path.join(eventImageDir, `last-event-${sn}.jpg`));
+    } catch {
+      // nothing persisted yet
     }
     let cam;
     try {
@@ -397,12 +564,13 @@ export function createWarmup(ctx) {
         await sleep(2500);
         continue;
       }
-      // `before` also catches the new image when HA's own /event-image fetch persisted it between polls.
-      if (jpeg?.length && (persistIfChanged(sn, jpeg) || (before && !before.equals(jpeg)))) {
+      const seenAt = jpeg?.length ? storedThumbnailSeenAt(storedThumbSeen, sn, jpeg) : -1;
+      if (seenAt >= since && !before?.equals(jpeg)) {
+        persistIfChanged(sn, jpeg);
         ctx.eventLog?.(`stored snapshot: ${sn} → last-event image updated (${jpeg.length}B, push)`);
         return true;
       }
-      if (!waitForNew) return false; // got bytes but unchanged — nothing new to nudge about
+      if (!waitForNew) return false; // only an earlier event's thumbnail — nothing new to nudge about
       await sleep(2500); // still the previous event's image: its successor is downloading
     }
     ctx.eventLog?.(`stored snapshot: ${sn} — no push thumbnail landed in time`);
@@ -459,16 +627,29 @@ export function createWarmup(ctx) {
    * runs both sources once, right now, and nudges HA if a fresh image lands. Backs the manual "Refresh
    * Last Event" control, and answers whether the image actually changed so the caller can report it.
    */
-  async function forceRefreshEventImage(sn) {
+  async function forceRefreshEventImage(sn, { answerWithinMs = FORCE_REFRESH_ANSWER_MS } = {}) {
     if (!sn) return false;
-    const [stored, local] = await Promise.all([
+    const work = Promise.all([
       refreshStoredSnapshotFor(sn).catch(() => false),
       refreshLastEventImageFor(sn).catch(() => false),
-    ]);
-    const changed = Boolean(stored || local);
-    nudge(sn, changed);
-    ctx.eventLog?.(`force refresh: ${sn} → ${changed ? "image updated" : "no newer image available yet"}`);
-    return changed;
+    ]).then(([stored, local]) => {
+      const changed = Boolean(stored || local);
+      nudge(sn, changed); // reaches HA even when the caller already had its answer
+      ctx.eventLog?.(`force refresh: ${sn} → ${changed ? "image updated" : "no newer image available yet"}`);
+      return changed;
+    });
+    let timer;
+    const answer = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        ctx.eventLog?.(`force refresh: ${sn} still running after ${answerWithinMs}ms — finishing in the background`);
+        resolve(false);
+      }, answerWithinMs);
+    });
+    try {
+      return await Promise.race([work, answer]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -498,13 +679,22 @@ export function createWarmup(ctx) {
       .finally(() => pendingRefresh.delete(sn));
   }
 
+  // EUFY_LOCAL_EVENT_REFRESH=0 (bridge #139): skip the HomeBase/local-storage P2P reads for an account
+  // where they return nothing but still hammer the camera — the on-detection cover refresh, the startup
+  // face-roster + last-event warm-ups, and the /event-image auto-heal. The push-thumbnail path
+  // (refreshStoredSnapshotFor), explicit /event-image force (forceRefreshEventImage) and live streaming
+  // are untouched.
+  const localEventRefresh = ctx.localEventRefresh !== false;
+  const noop = () => {};
+  const noopAsync = async () => {};
   return {
-    warmFaceRoster,
-    warmLastEventImages,
+    warmFaceRoster: localEventRefresh ? warmFaceRoster : noopAsync,
+    warmLastEventImages: localEventRefresh ? warmLastEventImages : noopAsync,
     refreshLastEventImageFor,
     refreshStoredSnapshotFor,
-    onDetectionRefresh,
+    onDetectionRefresh: localEventRefresh ? onDetectionRefresh : noop,
     forceRefreshEventImage,
-    autoHealEventImage,
+    autoHealEventImage: localEventRefresh ? autoHealEventImage : noop,
+    latestTriggerType,
   };
 }
